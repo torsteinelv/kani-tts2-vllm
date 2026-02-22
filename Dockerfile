@@ -1,5 +1,6 @@
-# Build-friendly base image (includes toolchain bits; still add a few missing deps)
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+# PyTorch >=2.6 is required by transformers due to CVE-2025-32434 checks.
+# Use the devel image so pyproject wheels (texterrors/cdifflib) can build.
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
 ARG KANI_SERVER_REPO=https://github.com/nineninesix-ai/kani-tts-2-openai-server.git
 ARG KANI_SERVER_REF=main
@@ -8,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1
 
-# System deps required to build pyproject wheels (texterrors/cdifflib) + audio deps
+# System deps required to build pyproject wheels + audio deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
@@ -27,7 +28,7 @@ WORKDIR /app
 # Pull upstream OpenAI-compatible server
 RUN git clone --depth 1 --branch ${KANI_SERVER_REF} ${KANI_SERVER_REPO} /app
 
-# Python deps (order matters a bit; keep transformers pinned)
+# Python deps
 RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install fastapi "uvicorn[standard]" scipy \
     && pip install "nemo-toolkit[tts]==2.4.0" \
@@ -57,6 +58,16 @@ p.write_text(txt)
 print("Patched config.py for env MODEL_NAME/CODEC_MODEL_NAME")
 PY
 
+# Optional compatibility shim ONLY if you still run this container via vllm-stack (which runs `vllm serve ...`)
+# If you deploy as a normal Deployment (python server.py), you can keep this or remove it—harmless either way.
+RUN bash -lc 'cat > /usr/local/bin/vllm << "SH"\n\
+#!/usr/bin/env bash\n\
+set -euo pipefail\n\
+exec python /app/server.py\n\
+SH\n\
+chmod +x /usr/local/bin/vllm'
+
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+# Normal default start (K8s Deployment can just run this).
+CMD ["python", "/app/server.py"]
