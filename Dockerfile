@@ -36,7 +36,6 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install triton
 
 # Patch upstream for maximum flexibility via environment variables
-# Skrevet om for å være robust og ikke krasje bygget hvis kildekoden endres litt
 RUN python - <<'PY'
 from pathlib import Path
 import re
@@ -70,15 +69,26 @@ txt = safe_sub(r'ATTN_IMPLEMENTATION\s*=\s*"[^"]+"', 'ATTN_IMPLEMENTATION = os.g
 cfg.write_text(txt)
 print("✅ Patched config.py with complete env overrides")
 
-# --- 2. server.py: vLLM init parameters ---
+# --- 2. server.py: vLLM init parameters + AUDIO FORMAT FIX ---
 srv = Path("/app/server.py")
 srv_txt = srv.read_text()
 if "import os" not in srv_txt:
     srv_txt = "import os\n" + srv_txt
 
+# vLLM Configs
 srv_txt = safe_sub(r'tensor_parallel_size\s*=\s*[0-9]+', 'tensor_parallel_size=int(os.getenv("TENSOR_PARALLEL_SIZE", "1"))', srv_txt, "tensor_parallel_size")
 srv_txt = safe_sub(r'gpu_memory_utilization\s*=\s*[0-9.]+', 'gpu_memory_utilization=float(os.getenv("GPU_MEMORY_UTILIZATION", "0.5"))', srv_txt, "gpu_memory_utilization")
 srv_txt = safe_sub(r'max_model_len\s*=\s*[0-9]+', 'max_model_len=int(os.getenv("MAX_MODEL_LEN", "1024"))', srv_txt, "max_model_len")
+
+# FIX FOR HOME ASSISTANT NOISE: Convert Float32 to Int16
+old_wav = "wav_write(wav_buffer, 22050, full_audio)"
+new_wav = "wav_write(wav_buffer, 22050, (full_audio * 32767).astype(np.int16))"
+if old_wav in srv_txt:
+    srv_txt = srv_txt.replace(old_wav, new_wav)
+    print("✅ Patched server.py to output 16-bit WAV (Fixes Home Assistant static noise)")
+else:
+    print("⚠️ Warning: Could not find WAV export line in server.py to patch format.")
+
 srv.write_text(srv_txt)
 print("✅ Patched server.py for vLLM init overrides")
 
@@ -93,7 +103,6 @@ if vgen.exists():
     print("✅ Patched vllm_generator.py for max_num_seqs overrides")
 
 # --- 4. inference_engine.py: SDPA math backend ---
-# Bruker string replace for å unngå Regex-problemer med Docker
 ie = Path("/app/kani_tts/inference_engine.py")
 if ie.exists():
     ie_txt = ie.read_text()
