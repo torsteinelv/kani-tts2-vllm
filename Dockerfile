@@ -36,40 +36,37 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install triton
 
 # Patch upstream for maximum flexibility via environment variables
+# Skrevet om for å være robust og ikke krasje bygget hvis kildekoden endres litt
 RUN python - <<'PY'
 from pathlib import Path
 import re
 import os
 
+def safe_sub(pattern, repl, text, name):
+    new_text, n = re.subn(pattern, repl, text, count=1)
+    if n == 0:
+        print(f"⚠️ Warning: Could not apply patch for {name} (pattern not found, moving on)")
+    return new_text
+
 # --- 1. config.py: env overrides for Audio, Generation and Long-form ---
 cfg = Path("/app/config.py")
 txt = cfg.read_text()
 if "import os" not in txt:
-    txt = re.sub(r'("""[^"]*?""")', r'\1\nimport os', txt, count=1, flags=re.DOTALL)
+    txt = "import os\n" + txt
 
-# Models
-txt = re.sub(r'MODEL_NAME\s*=\s*"[^"]+"', 'MODEL_NAME = os.getenv("MODEL_NAME", "nineninesix/kani-tts-2-pt")', txt, count=1)
-txt = re.sub(r'CODEC_MODEL_NAME\s*=\s*"[^"]+"', 'CODEC_MODEL_NAME = os.getenv("CODEC_MODEL_NAME", "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps")', txt, count=1)
-
-# Audio Settings (Streaming responsiveness)
-txt = re.sub(r'CHUNK_SIZE\s*=\s*[0-9]+', 'CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "25"))', txt, count=1)
-txt = re.sub(r'LOOKBACK_FRAMES\s*=\s*[0-9]+', 'LOOKBACK_FRAMES = int(os.getenv("LOOKBACK_FRAMES", "15"))', txt, count=1)
-
-# Generation Parameters
-txt = re.sub(r'TEMPERATURE\s*=\s*[0-9.]+', 'TEMPERATURE = float(os.getenv("TEMPERATURE", "0.6"))', txt, count=1)
-txt = re.sub(r'TOP_P\s*=\s*[0-9.]+', 'TOP_P = float(os.getenv("TOP_P", "0.95"))', txt, count=1)
-txt = re.sub(r'REPETITION_PENALTY\s*=\s*[0-9.]+', 'REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.1"))', txt, count=1)
-txt = re.sub(r'MAX_TOKENS\s*=\s*[0-9]+', 'MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1200"))', txt, count=1)
-
-# Long-Form Settings
-txt = re.sub(r'LONG_FORM_THRESHOLD_SECONDS\s*=\s*[0-9.]+', 'LONG_FORM_THRESHOLD_SECONDS = float(os.getenv("LONG_FORM_THRESHOLD_SECONDS", "15.0"))', txt, count=1)
-txt = re.sub(r'LONG_FORM_CHUNK_DURATION\s*=\s*[0-9.]+', 'LONG_FORM_CHUNK_DURATION = float(os.getenv("LONG_FORM_CHUNK_DURATION", "12.0"))', txt, count=1)
-txt = re.sub(r'LONG_FORM_SILENCE_DURATION\s*=\s*[0-9.]+', 'LONG_FORM_SILENCE_DURATION = float(os.getenv("LONG_FORM_SILENCE_DURATION", "0.2"))', txt, count=1)
-
-# Flags
-txt = re.sub(r'USE_CUDA_GRAPHS\s*=\s*(True|False)', 'USE_CUDA_GRAPHS = os.getenv("USE_CUDA_GRAPHS", "0").lower() in ("1","true","yes","y","on")', txt, count=1)
-txt = re.sub(r'ATTN_IMPLEMENTATION\s*=\s*"[^"]+"', 'ATTN_IMPLEMENTATION = os.getenv("ATTN_IMPLEMENTATION", "sdpa")', txt, count=1)
-
+txt = safe_sub(r'MODEL_NAME\s*=\s*"[^"]+"', 'MODEL_NAME = os.getenv("MODEL_NAME", "nineninesix/kani-tts-2-pt")', txt, "MODEL_NAME")
+txt = safe_sub(r'CODEC_MODEL_NAME\s*=\s*"[^"]+"', 'CODEC_MODEL_NAME = os.getenv("CODEC_MODEL_NAME", "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps")', txt, "CODEC_MODEL_NAME")
+txt = safe_sub(r'CHUNK_SIZE\s*=\s*[0-9]+', 'CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "25"))', txt, "CHUNK_SIZE")
+txt = safe_sub(r'LOOKBACK_FRAMES\s*=\s*[0-9]+', 'LOOKBACK_FRAMES = int(os.getenv("LOOKBACK_FRAMES", "15"))', txt, "LOOKBACK_FRAMES")
+txt = safe_sub(r'TEMPERATURE\s*=\s*[0-9.]+', 'TEMPERATURE = float(os.getenv("TEMPERATURE", "0.6"))', txt, "TEMPERATURE")
+txt = safe_sub(r'TOP_P\s*=\s*[0-9.]+', 'TOP_P = float(os.getenv("TOP_P", "0.95"))', txt, "TOP_P")
+txt = safe_sub(r'REPETITION_PENALTY\s*=\s*[0-9.]+', 'REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.1"))', txt, "REPETITION_PENALTY")
+txt = safe_sub(r'MAX_TOKENS\s*=\s*[0-9]+', 'MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1200"))', txt, "MAX_TOKENS")
+txt = safe_sub(r'LONG_FORM_THRESHOLD_SECONDS\s*=\s*[0-9.]+', 'LONG_FORM_THRESHOLD_SECONDS = float(os.getenv("LONG_FORM_THRESHOLD_SECONDS", "15.0"))', txt, "LONG_FORM_THRESHOLD_SECONDS")
+txt = safe_sub(r'LONG_FORM_CHUNK_DURATION\s*=\s*[0-9.]+', 'LONG_FORM_CHUNK_DURATION = float(os.getenv("LONG_FORM_CHUNK_DURATION", "12.0"))', txt, "LONG_FORM_CHUNK_DURATION")
+txt = safe_sub(r'LONG_FORM_SILENCE_DURATION\s*=\s*[0-9.]+', 'LONG_FORM_SILENCE_DURATION = float(os.getenv("LONG_FORM_SILENCE_DURATION", "0.2"))', txt, "LONG_FORM_SILENCE_DURATION")
+txt = safe_sub(r'USE_CUDA_GRAPHS\s*=\s*(True|False)', 'USE_CUDA_GRAPHS = os.getenv("USE_CUDA_GRAPHS", "0").lower() in ("1","true","yes","y","on")', txt, "USE_CUDA_GRAPHS")
+txt = safe_sub(r'ATTN_IMPLEMENTATION\s*=\s*"[^"]+"', 'ATTN_IMPLEMENTATION = os.getenv("ATTN_IMPLEMENTATION", "sdpa")', txt, "ATTN_IMPLEMENTATION")
 cfg.write_text(txt)
 print("✅ Patched config.py with complete env overrides")
 
@@ -79,31 +76,35 @@ srv_txt = srv.read_text()
 if "import os" not in srv_txt:
     srv_txt = "import os\n" + srv_txt
 
-srv_txt = re.sub(r'tensor_parallel_size\s*=\s*[0-9]+', 'tensor_parallel_size=int(os.getenv("TENSOR_PARALLEL_SIZE", "1"))', srv_txt)
-srv_txt = re.sub(r'gpu_memory_utilization\s*=\s*[0-9.]+', 'gpu_memory_utilization=float(os.getenv("GPU_MEMORY_UTILIZATION", "0.5"))', srv_txt)
-srv_txt = re.sub(r'max_model_len\s*=\s*[0-9]+', 'max_model_len=int(os.getenv("MAX_MODEL_LEN", "1024"))', srv_txt)
-
+srv_txt = safe_sub(r'tensor_parallel_size\s*=\s*[0-9]+', 'tensor_parallel_size=int(os.getenv("TENSOR_PARALLEL_SIZE", "1"))', srv_txt, "tensor_parallel_size")
+srv_txt = safe_sub(r'gpu_memory_utilization\s*=\s*[0-9.]+', 'gpu_memory_utilization=float(os.getenv("GPU_MEMORY_UTILIZATION", "0.5"))', srv_txt, "gpu_memory_utilization")
+srv_txt = safe_sub(r'max_model_len\s*=\s*[0-9]+', 'max_model_len=int(os.getenv("MAX_MODEL_LEN", "1024"))', srv_txt, "max_model_len")
 srv.write_text(srv_txt)
 print("✅ Patched server.py for vLLM init overrides")
 
 # --- 3. generation/vllm_generator.py: max_num_seqs (Batch processing) ---
 vgen = Path("/app/generation/vllm_generator.py")
-vgen_txt = vgen.read_text()
-if "import os" not in vgen_txt:
-    vgen_txt = "import os\n" + vgen_txt
-
-vgen_txt = re.sub(r'max_num_seqs\s*=\s*[0-9]+', 'max_num_seqs=int(os.getenv("MAX_NUM_SEQS", "1"))', vgen_txt)
-vgen.write_text(vgen_txt)
-print("✅ Patched vllm_generator.py for max_num_seqs overrides")
+if vgen.exists():
+    vgen_txt = vgen.read_text()
+    if "import os" not in vgen_txt:
+        vgen_txt = "import os\n" + vgen_txt
+    vgen_txt = safe_sub(r'max_num_seqs\s*=\s*[0-9]+', 'max_num_seqs=int(os.getenv("MAX_NUM_SEQS", "1"))', vgen_txt, "max_num_seqs")
+    vgen.write_text(vgen_txt)
+    print("✅ Patched vllm_generator.py for max_num_seqs overrides")
 
 # --- 4. inference_engine.py: SDPA math backend ---
+# Bruker string replace for å unngå Regex-problemer med Docker
 ie = Path("/app/kani_tts/inference_engine.py")
-ie_txt = ie.read_text()
-ie_txt, n = re.subn(r'torch\.backends\.cuda\.enable_math_sdp\(False\)', 'torch.backends.cuda.enable_math_sdp(not self.use_cuda_graphs)', ie_txt, count=1)
-if n == 0:
-    raise RuntimeError("Could not patch kani_tts/inference_engine.py (enable_math_sdp)")
-ie.write_text(ie_txt)
-print("✅ Patched kani_tts/inference_engine.py")
+if ie.exists():
+    ie_txt = ie.read_text()
+    old_str = "torch.backends.cuda.enable_math_sdp(False)"
+    new_str = "torch.backends.cuda.enable_math_sdp(not self.use_cuda_graphs)"
+    if old_str in ie_txt:
+        ie_txt = ie_txt.replace(old_str, new_str)
+        ie.write_text(ie_txt)
+        print("✅ Patched kani_tts/inference_engine.py")
+    else:
+        print("⚠️ Warning: Could not find target string in inference_engine.py")
 
 # --- 5. entrypoint.py: API key auth + VRAM fraction + /metrics + /v1/models ---
 entry = Path("/app/entrypoint.py")
