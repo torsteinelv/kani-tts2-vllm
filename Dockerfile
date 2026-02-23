@@ -21,6 +21,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install "transformers==4.57.1" \
     && pip install triton
 
+# Smart Patching Script som finner filer selv og legger til SEED-støtte
 RUN python - <<'PY'
 from pathlib import Path
 import re
@@ -32,80 +33,86 @@ def safe_sub(pattern, repl, text, name):
         print(f"⚠️ Warning: Could not apply patch for {name}")
     return new_text
 
-# --- 1. config.py: Miljøvariabler for alt ---
-cfg = Path("/app/config.py")
-txt = cfg.read_text()
-if "import os" not in txt: txt = "import os\n" + txt
-overrides = {
-    r'TEMPERATURE\s*=\s*[0-9.]+': 'TEMPERATURE = float(os.getenv("TEMPERATURE", "0.6"))',
-    r'TOP_P\s*=\s*[0-9.]+': 'TOP_P = float(os.getenv("TOP_P", "0.95"))',
-    r'CHUNK_SIZE\s*=\s*[0-9]+': 'CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "25"))',
-    r'MAX_TOKENS\s*=\s*[0-9]+': 'MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1200"))',
-    r'MODEL_NAME\s*=\s*"[^"]+"': 'MODEL_NAME = os.getenv("MODEL_NAME", "nineninesix/kani-tts-2-pt")'
-}
-for p, r in overrides.items(): txt = safe_sub(p, r, txt, p)
-cfg.write_text(txt)
+def find_file(name):
+    for path in Path("/app").rglob(name):
+        return path
+    return None
 
-# --- 2. server.py: Utvid API-et og fiks lydformat ---
-srv = Path("/app/server.py")
-stxt = srv.read_text()
-if "import os" not in stxt: stxt = "import os\n" + stxt
+# --- 1. config.py ---
+cfg_path = find_file("config.py")
+if cfg_path:
+    txt = cfg_path.read_text()
+    if "import os" not in txt: txt = "import os\n" + txt
+    txt = re.sub(r'TEMPERATURE\s*=\s*[0-9.]+', 'TEMPERATURE = float(os.getenv("TEMPERATURE", "0.6"))', txt)
+    txt = re.sub(r'TOP_P\s*=\s*[0-9.]+', 'TOP_P = float(os.getenv("TOP_P", "0.95"))', txt)
+    txt = re.sub(r'CHUNK_SIZE\s*=\s*[0-9]+', 'CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "25"))', txt)
+    cfg_path.write_text(txt)
+    print(f"✅ Patched {cfg_path}")
 
-# Legg til temperatur/top_p/seed i API-modellen
-stxt = safe_sub(
-    r'response_format: Literal\["wav", "pcm"\] = Field\(default="wav", description="Audio format: wav or pcm"\)',
-    'response_format: Literal["wav", "pcm"] = "wav"\n    temperature: Optional[float] = None\n    top_p: Optional[float] = None\n    seed: Optional[int] = None',
-    stxt, "API_FIELDS"
-)
+# --- 2. server.py: Legg til SEED og REPETITION_PENALTY i API ---
+srv_path = find_file("server.py")
+if srv_path:
+    stxt = srv_path.read_text()
+    # Utvid OpenAI-modellen til å godta Seed og Repetition Penalty
+    stxt = safe_sub(
+        r'(response_format:.*?=.*?Field\(.*?\))',
+        r'\1\n    temperature: Optional[float] = None\n    top_p: Optional[float] = None\n    seed: Optional[int] = None\n    repetition_penalty: Optional[float] = None',
+        stxt, "API_FIELDS"
+    )
+    # Send verdiene videre til generatoren
+    stxt = stxt.replace(
+        'max_tokens=MAX_TOKENS',
+        'max_tokens=MAX_TOKENS, temperature=request.temperature, top_p=request.top_p, seed=request.seed, repetition_penalty=request.repetition_penalty'
+    )
+    # 16-bit fiks for susing i Home Assistant
+    stxt = stxt.replace("wav_write(wav_buffer, 22050, full_audio)", "wav_write(wav_buffer, 22050, (full_audio * 32767).astype(np.int16))")
+    srv_path.write_text(stxt)
+    print(f"✅ Patched {srv_path}")
 
-# Send verdiene videre til generatoren
-stxt = stxt.replace(
-    'result = await generator._generate_async(\n                    prompt_text,\n                    audio_writer,\n                    max_tokens=MAX_TOKENS\n                )',
-    'result = await generator._generate_async(prompt_text, audio_writer, max_tokens=MAX_TOKENS, temperature=request.temperature, top_p=request.top_p, seed=request.seed)'
-)
+# --- 3. vllm_generator.py: Implementer Seed-støtte i vLLM-motoren ---
+vgen_path = find_file("vllm_generator.py")
+if vgen_path:
+    vtxt = vgen_path.read_text()
+    # Oppdater funksjonssignatur
+    vtxt = vtxt.replace(
+        'async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS):',
+        'async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS, temperature=None, top_p=None, seed=None, repetition_penalty=None):'
+    )
+    # Injiser dynamiske SamplingParams
+    vtxt = safe_sub(
+        r'sampling_params = self\.sampling_params',
+        'sampling_params = SamplingParams(temperature=temperature if temperature is not None else TEMPERATURE, top_p=top_p if top_p is not None else TOP_P, max_tokens=max_tokens, repetition_penalty=repetition_penalty if repetition_penalty is not None else REPETITION_PENALTY, stop_token_ids=[END_OF_AI], seed=seed)',
+        vtxt, "SAMPLING_PARAMS"
+    )
+    vgen_path.write_text(vtxt)
+    print(f"✅ Patched {vgen_path}")
 
-# 16-bit WAV fiks (Fjerner susing)
-stxt = stxt.replace("wav_write(wav_buffer, 22050, full_audio)", "wav_write(wav_buffer, 22050, (full_audio * 32767).astype(np.int16))")
-srv.write_text(stxt)
-
-# --- 3. vllm_generator.py: Støtte for Seed og dynamiske parametere ---
-vgen = Path("/app/generation/vllm_generator.py")
-vtxt = vgen.read_text()
-# Oppdater funksjonssignatur
-vtxt = vtxt.replace(
-    'async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS):',
-    'async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS, temperature=None, top_p=None, seed=None):'
-)
-# Bruk innsendte verdier eller fall tilbake på defaults
-vtxt = safe_sub(
-    r'sampling_params = self\.sampling_params',
-    'sampling_params = SamplingParams(temperature=temperature if temperature is not None else TEMPERATURE, top_p=top_p if top_p is not None else TOP_P, max_tokens=max_tokens, repetition_penalty=REPETITION_PENALTY, stop_token_ids=[END_OF_AI], seed=seed)',
-    vtxt, "SAMPLING_PARAMS"
-)
-vtxt = safe_sub(r'max_num_seqs\s*=\s*[0-9]+', 'max_num_seqs=int(os.getenv("MAX_NUM_SEQS", "1"))', vtxt, "MAX_NUM_SEQS")
-vgen.write_text(vtxt)
-
-# --- 4. entrypoint.py: Auth + Metrics ---
-Path("/app/entrypoint.py").write_text(r'''import os, time, torch
+# --- 4. entrypoint.py: Full OpenAI-kompatibilitet og Auth ---
+Path("/app/entrypoint.py").write_text(r'''
+import os, time, torch
 from server import app
+import uvicorn
+
 @app.get("/v1/models")
 async def list_models():
     return {"object": "list", "data": [{"id": os.getenv("SERVED_MODEL_NAME", "tts-1"), "object": "model", "created": int(time.time()), "owned_by": "kani-tts"}]}
-API_KEY = os.getenv("VLLM_API_KEY")
+
+API_KEY = os.getenv("VLLM_API_KEY") or os.getenv("API_KEY")
 if API_KEY:
     from fastapi import Request
     from fastapi.responses import JSONResponse
     @app.middleware("http")
-    async def auth(request: Request, call_next):
-        if request.url.path.startswith("/v1/") and request.headers.get("authorization") != f"Bearer {API_KEY}":
-            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    async def require_auth(request: Request, call_next):
+        if request.url.path.startswith("/v1/"):
+            auth = request.headers.get("authorization", "")
+            if auth != f"Bearer {API_KEY}":
+                return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         return await call_next(request)
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 ''')
 PY
 
-RUN printf '#!/usr/bin/env bash\nexec python /app/entrypoint.py\n' > /usr/local/bin/vllm && chmod +x /usr/local/bin/vllm
 EXPOSE 8000
 CMD ["python", "/app/entrypoint.py"]
