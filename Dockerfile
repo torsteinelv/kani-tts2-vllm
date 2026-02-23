@@ -8,16 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    ffmpeg \
-    build-essential \
-    python3-dev \
-    cmake \
-    ninja-build \
-    pkg-config \
-    libsndfile1 \
-    libsndfile1-dev \
+    git ca-certificates ffmpeg build-essential python3-dev cmake ninja-build pkg-config libsndfile1 libsndfile1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -29,6 +20,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install "transformers==4.57.1" \
     && pip install triton
 
+# Patch: env overrides + safe attention fallback + API key auth + /metrics + /v1/models
 RUN python - <<'PY'
 from pathlib import Path
 import re
@@ -39,10 +31,9 @@ def safe_sub(pattern, repl, text, name):
         print(f"⚠️ Patch skipped: {name} (pattern not found)")
     return new_text
 
-# --- config.py: env overrides ---
+# --- config.py: env overrides (safe ones only) ---
 cfg = Path("/app/config.py")
 txt = cfg.read_text()
-
 if "import os" not in txt:
     txt = "import os\n" + txt
 
@@ -52,50 +43,19 @@ txt = safe_sub(r'MODEL_NAME\s*=\s*"[^"]+"',
 txt = safe_sub(r'CODEC_MODEL_NAME\s*=\s*"[^"]+"',
                'CODEC_MODEL_NAME = os.getenv("CODEC_MODEL_NAME", "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps")',
                txt, "CODEC_MODEL_NAME")
-
-# Generation defaults (safe + overridable)
 txt = safe_sub(r'CHUNK_SIZE\s*=\s*[0-9]+',
                'CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "25"))',
                txt, "CHUNK_SIZE")
 txt = safe_sub(r'LOOKBACK_FRAMES\s*=\s*[0-9]+',
                'LOOKBACK_FRAMES = int(os.getenv("LOOKBACK_FRAMES", "15"))',
                txt, "LOOKBACK_FRAMES")
-txt = safe_sub(r'TEMPERATURE\s*=\s*[0-9.]+',
-               'TEMPERATURE = float(os.getenv("TEMPERATURE", "0.6"))',
-               txt, "TEMPERATURE")
-txt = safe_sub(r'TOP_P\s*=\s*[0-9.]+',
-               'TOP_P = float(os.getenv("TOP_P", "0.95"))',
-               txt, "TOP_P")
-txt = safe_sub(r'REPETITION_PENALTY\s*=\s*[0-9.]+',
-               'REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.1"))',
-               txt, "REPETITION_PENALTY")
-txt = safe_sub(r'MAX_TOKENS\s*=\s*[0-9]+',
-               'MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1200"))',
-               txt, "MAX_TOKENS")
-
-# Long-form tuning
-txt = safe_sub(r'LONG_FORM_THRESHOLD_SECONDS\s*=\s*[0-9.]+',
-               'LONG_FORM_THRESHOLD_SECONDS = float(os.getenv("LONG_FORM_THRESHOLD_SECONDS", "15.0"))',
-               txt, "LONG_FORM_THRESHOLD_SECONDS")
-txt = safe_sub(r'LONG_FORM_CHUNK_DURATION\s*=\s*[0-9.]+',
-               'LONG_FORM_CHUNK_DURATION = float(os.getenv("LONG_FORM_CHUNK_DURATION", "12.0"))',
-               txt, "LONG_FORM_CHUNK_DURATION")
-txt = safe_sub(r'LONG_FORM_SILENCE_DURATION\s*=\s*[0-9.]+',
-               'LONG_FORM_SILENCE_DURATION = float(os.getenv("LONG_FORM_SILENCE_DURATION", "0.2"))',
-               txt, "LONG_FORM_SILENCE_DURATION")
-
-# CUDA graphs and attention impl (compat)
 txt = safe_sub(r'USE_CUDA_GRAPHS\s*=\s*(True|False)',
                'USE_CUDA_GRAPHS = os.getenv("USE_CUDA_GRAPHS", "0").lower() in ("1","true","yes","y","on")',
                txt, "USE_CUDA_GRAPHS")
-txt = safe_sub(r'ATTN_IMPLEMENTATION\s*=\s*"[^"]+"',
-               'ATTN_IMPLEMENTATION = os.getenv("ATTN_IMPLEMENTATION", "sdpa")',
-               txt, "ATTN_IMPLEMENTATION")
-
 cfg.write_text(txt)
 print("✅ Patched config.py")
 
-# --- inference_engine.py: SDPA math backend safe for non-graphs ---
+# --- inference_engine.py: don't disable math SDPA unless CUDA graphs are enabled ---
 ie = Path("/app/kani_tts/inference_engine.py")
 if ie.exists():
     ie_txt = ie.read_text()
@@ -107,13 +67,35 @@ if ie.exists():
         print("✅ Patched inference_engine.py (SDPA math conditional)")
     else:
         print("⚠️ inference_engine.py patch skipped (string not found)")
-else:
-    print("⚠️ inference_engine.py not found, skipped")
 
-# --- entrypoint.py: auth + metrics + models + best-effort VRAM fraction ---
+# --- server.py: DO NOT pass unsupported kwargs into generator ---
+# (Wyoming/OpenAI clients may send temperature/top_p/etc; the generator doesn't accept them)
+srv = Path("/app/server.py")
+srv_txt = srv.read_text()
+
+# Remove any attempt to pass temperature/top_p/seed/repetition_penalty into generator call.
+srv_txt = srv_txt.replace(
+    "temperature=request.temperature, top_p=request.top_p, seed=request.seed, repetition_penalty=request.repetition_penalty",
+    ""
+)
+srv_txt = srv_txt.replace(", ,", ",").replace("(,", "(").replace(",)", ")")
+srv.write_text(srv_txt)
+print("✅ Patched server.py (removed unsupported kwargs)")
+
+# --- entrypoint.py: API key auth + VRAM fraction + forced math SDP option + /metrics + /v1/models ---
 Path("/app/entrypoint.py").write_text(r'''import os
 import time
 import torch
+
+# Optional: force math SDPA to avoid "No available kernel" on some GPUs
+if os.getenv("FORCE_MATH_SDP", "0").lower() in ("1","true","yes","y","on") and torch.cuda.is_available():
+    try:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+        print("✅ Forced math SDP (flash/mem_efficient disabled)")
+    except Exception as e:
+        print(f"⚠️ Could not force math SDP: {e}")
 
 # Best-effort VRAM limiting (PyTorch caching allocator)
 frac = os.getenv("CUDA_MEMORY_FRACTION") or os.getenv("GPU_MEMORY_UTILIZATION")
@@ -128,45 +110,33 @@ if frac and torch.cuda.is_available():
 
 from server import app  # noqa: E402
 
-# Minimal OpenAI-ish models endpoint (helps tools; avoids 404 spam)
 @app.get("/v1/models")
 async def list_models():
     now = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {"id": os.getenv("SERVED_MODEL_NAME", "tts-1"), "object": "model", "created": now, "owned_by": "kani-tts"}
-        ],
-    }
+    return {"object":"list","data":[{"id": os.getenv("SERVED_MODEL_NAME","tts-1"), "object":"model", "created": now, "owned_by":"kani-tts"}]}
 
-# Prometheus endpoint
 try:
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # type: ignore
     from fastapi import Response  # noqa: E402
-
     @app.get("/metrics")
     async def metrics():
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
     print("✅ /metrics enabled")
 except Exception as e:
     print(f"⚠️ /metrics disabled: {e}")
 
-# API key auth for /v1/* (keep /health and /metrics open)
+# API key auth for /v1/*
 API_KEY = os.getenv("VLLM_API_KEY") or os.getenv("API_KEY")
 if API_KEY:
     from fastapi import Request  # noqa: E402
     from fastapi.responses import JSONResponse  # noqa: E402
-
     @app.middleware("http")
     async def require_bearer_token(request: Request, call_next):
-        p = request.url.path
-        if p.startswith("/v1/"):
+        if request.url.path.startswith("/v1/"):
             auth = request.headers.get("authorization", "")
             if auth != f"Bearer {API_KEY}":
-                return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+                return JSONResponse(status_code=401, content={"error":"Unauthorized"})
         return await call_next(request)
-
     print("✅ API key auth enabled for /v1/* (via VLLM_API_KEY)")
 else:
     print("⚠️ VLLM_API_KEY not set - /v1/* is UNAUTHENTICATED")
@@ -181,9 +151,7 @@ if __name__ == "__main__":
 print("✅ Wrote /app/entrypoint.py")
 PY
 
-# --- vllm-stack compatibility shim ---
-# Helm chart runs: vllm serve <modelURL> --host ... --port ... --gpu_memory_utilization X
-# We parse host/port/util and start our entrypoint.
+# vllm-stack shim: chart runs `vllm serve ...`
 RUN printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
@@ -197,7 +165,6 @@ RUN printf '%s\n' \
   '    *) shift ;;' \
   '  esac' \
   'done' \
-  'export HOST PORT' \
   'exec python /app/entrypoint.py' \
   > /usr/local/bin/vllm \
   && chmod +x /usr/local/bin/vllm
