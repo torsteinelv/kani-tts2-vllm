@@ -1,4 +1,4 @@
-# PyTorch >=2.6 is required by transformers
+# PyTorch >=2.6 is required
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
 ARG KANI_SERVER_REPO=https://github.com/nineninesix-ai/kani-tts-2-openai-server.git
@@ -21,7 +21,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install "transformers==4.57.1" \
     && pip install triton
 
-# Smart Patching Script som finner filer selv og legger til SEED-støtte
+# Smart Patching Script som finner filer selv
 RUN python - <<'PY'
 from pathlib import Path
 import re
@@ -53,46 +53,41 @@ if cfg_path:
 srv_path = find_file("server.py")
 if srv_path:
     stxt = srv_path.read_text()
-    # Utvid OpenAI-modellen til å godta Seed og Repetition Penalty
     stxt = safe_sub(
         r'(response_format:.*?=.*?Field\(.*?\))',
         r'\1\n    temperature: Optional[float] = None\n    top_p: Optional[float] = None\n    seed: Optional[int] = None\n    repetition_penalty: Optional[float] = None',
         stxt, "API_FIELDS"
     )
-    # Send verdiene videre til generatoren
     stxt = stxt.replace(
         'max_tokens=MAX_TOKENS',
         'max_tokens=MAX_TOKENS, temperature=request.temperature, top_p=request.top_p, seed=request.seed, repetition_penalty=request.repetition_penalty'
     )
-    # 16-bit fiks for susing i Home Assistant
     stxt = stxt.replace("wav_write(wav_buffer, 22050, full_audio)", "wav_write(wav_buffer, 22050, (full_audio * 32767).astype(np.int16))")
     srv_path.write_text(stxt)
     print(f"✅ Patched {srv_path}")
 
-# --- 3. vllm_generator.py: Implementer Seed-støtte i vLLM-motoren ---
+# --- 3. vllm_generator.py: Implementer Seed-støtte ---
 vgen_path = find_file("vllm_generator.py")
 if vgen_path:
     vtxt = vgen_path.read_text()
-    # Oppdater funksjonssignatur
     vtxt = vtxt.replace(
         'async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS):',
         'async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS, temperature=None, top_p=None, seed=None, repetition_penalty=None):'
     )
-    # Injiser dynamiske SamplingParams
     vtxt = safe_sub(
         r'sampling_params = self\.sampling_params',
         'sampling_params = SamplingParams(temperature=temperature if temperature is not None else TEMPERATURE, top_p=top_p if top_p is not None else TOP_P, max_tokens=max_tokens, repetition_penalty=repetition_penalty if repetition_penalty is not None else REPETITION_PENALTY, stop_token_ids=[END_OF_AI], seed=seed)',
         vtxt, "SAMPLING_PARAMS"
     )
+    # Patch for max_num_seqs
+    vtxt = re.sub(r'max_num_seqs\s*=\s*[0-9]+', 'max_num_seqs=int(os.getenv("MAX_NUM_SEQS", "1"))', vtxt)
     vgen_path.write_text(vtxt)
     print(f"✅ Patched {vgen_path}")
 
-# --- 4. entrypoint.py: Full OpenAI-kompatibilitet og Auth ---
+# --- 4. entrypoint.py ---
 Path("/app/entrypoint.py").write_text(r'''
-import os, time, torch
+import os, time, torch, uvicorn
 from server import app
-import uvicorn
-
 @app.get("/v1/models")
 async def list_models():
     return {"object": "list", "data": [{"id": os.getenv("SERVED_MODEL_NAME", "tts-1"), "object": "model", "created": int(time.time()), "owned_by": "kani-tts"}]}
@@ -108,7 +103,6 @@ if API_KEY:
             if auth != f"Bearer {API_KEY}":
                 return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         return await call_next(request)
-
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 ''')
