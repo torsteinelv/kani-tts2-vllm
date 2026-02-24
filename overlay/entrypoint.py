@@ -1,7 +1,81 @@
 import os
 import time
+import glob
 import torch
 import uvicorn
+
+# ==============================================================================
+# 1. AUTO-GENERER .pt FILER FRA .wav/.mp3 PÅ OPPSTART
+# ==============================================================================
+VOICES_DIR = "/app/voices"
+if os.path.exists(VOICES_DIR):
+    print("\n🎤 Sjekker voices-mappen for lydfiler som trenger konvertering...")
+    try:
+        from kani_tts import SpeakerEmbedder
+        embedder = None
+        for ext in ("*.wav", "*.mp3"):
+            for audio_file in glob.glob(os.path.join(VOICES_DIR, ext)):
+                base_name = os.path.splitext(os.path.basename(audio_file))[0]
+                pt_file = os.path.join(VOICES_DIR, f"{base_name}.pt")
+                
+                if not os.path.exists(pt_file):
+                    if embedder is None:
+                        print("⏳ Starter opp SpeakerEmbedder (dette gjøres bare én gang)...")
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        embedder = SpeakerEmbedder(device=device)
+                        
+                    print(f"🎙️ Trekker ut stemmeprofil fra {audio_file}...")
+                    emb = embedder.embed_audio_file(audio_file)
+                    torch.save(emb, pt_file)
+                    print(f"✅ Lagret superrask profil: {pt_file}")
+                    
+        if embedder is not None and torch.cuda.is_available():
+            del embedder
+            torch.cuda.empty_cache()
+            print("🧹 Tømte grafikkminnet etter SpeakerEmbedder.")
+            
+    except ImportError:
+        print("⚠️ Kunne ikke importere SpeakerEmbedder. Biblioteket mangler.")
+    except Exception as e:
+        print(f"⚠️ Feil under konvertering av lydfiler: {e}")
+
+# ==============================================================================
+# 2. MONKEY-PATCH FOR Å INJISERE VOICE CLONING I API-ET
+# ==============================================================================
+try:
+    import kani_tts.core
+    original_run_model = kani_tts.core.KaniModel.run_model
+    
+    def patched_run_model(self, text, language_tag=None, speaker_emb=None, temperature=1.0, top_p=0.95, repetition_penalty=1.1):
+        import re
+        import os
+        import torch
+        
+        # Hvis API-et ikke allerede har sendt med en speaker_emb
+        if speaker_emb is None:
+            # API-serveren formaterer ofte teksten som "kathrine: Hei på deg"
+            match = re.match(r'^([a-zA-Z0-9_-]+):\s*(.*)$', text)
+            if match:
+                voice_name = match.group(1).lower()
+                pt_path = f"/app/voices/{voice_name}.pt"
+                
+                if os.path.exists(pt_path):
+                    print(f"🎯 [Auto-Voice] Fant profil for '{voice_name}', aktiverer Voice Cloning!")
+                    # Last inn tensoren og send den med til modellen
+                    speaker_emb = torch.load(pt_path)
+                    if torch.cuda.is_available() and isinstance(speaker_emb, torch.Tensor):
+                        speaker_emb = speaker_emb.to("cuda")
+                        
+        return original_run_model(self, text, language_tag, speaker_emb, temperature, top_p, repetition_penalty)
+
+    kani_tts.core.KaniModel.run_model = patched_run_model
+    print("✅ Injisert Voice Cloning-støtte i KaniTTS!")
+except Exception as e:
+    print(f"⚠️ Kunne ikke patche KaniModel: {e}")
+
+# ==============================================================================
+# ORIGINAL SERVER KODE STARTER HER
+# ==============================================================================
 
 # ---- Stability: avoid "No available kernel" on some GPUs ----
 if os.getenv("FORCE_MATH_SDP", "1").lower() in ("1", "true", "yes", "y", "on") and torch.cuda.is_available():
