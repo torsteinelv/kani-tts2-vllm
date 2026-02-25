@@ -29,6 +29,8 @@ from config import (
     MAX_MODEL_LEN,
     START_OF_SPEECH,
 )
+FORCE_MATH_SDP = os.getenv("FORCE_MATH_SDP", "0").lower() in ("1", "true", "yes", "on")
+MAX_NUM_SEQS = int(os.getenv("MAX_NUM_SEQS", "1"))
 
 from generation.long_form import generate_long_form_async
 from kani_tts.core import TTSConfig, NemoAudioPlayer, KaniModel
