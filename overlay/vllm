@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# vllm-stack will call: vllm serve <something> --host ... --port ...
-# We ignore those args and just start our server.
+HOST="0.0.0.0"
+PORT="8000"
 
-HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8000}"
+# vllm-stack calls: vllm serve <model> --host ... --port ... etc
+if [[ "${1:-}" == "serve" ]]; then
+  shift
+  if [[ "${1:-}" != "" && "${1:-}" != --* ]]; then
+    export MODEL_NAME="$1"
+    shift
+  fi
+fi
 
-# Make sure we run in the right dir
-cd /app
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host) HOST="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --max-model-len) export MAX_MODEL_LEN="$2"; shift 2 ;;
+    --max-num-seqs) export MAX_NUM_SEQS="$2"; shift 2 ;;
+    --gpu-memory-utilization) export GPU_MEMORY_UTILIZATION="$2"; shift 2 ;;
+    --dtype) export VLLM_DTYPE="$2"; shift 2 ;;
+    --trust-remote-code) export TRUST_REMOTE_CODE="1"; shift ;;
+    *) shift ;;
+  esac
+done
 
-echo "🎤 Starting KaniTTS vLLM server on ${HOST}:${PORT} (MODEL_NAME=${MODEL_NAME:-<not set>})"
-
-exec python3 -m uvicorn server:app --host "${HOST}" --port "${PORT}" --log-level info
+echo "🎤 Starting KaniTTS vLLM server on ${HOST}:${PORT} (MODEL_NAME=${MODEL_NAME:-})"
+exec python3 -m uvicorn server:app --host "${HOST}" --port "${PORT}"
