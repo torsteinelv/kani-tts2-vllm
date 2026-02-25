@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-Apply our overlay patches to the upstream kani-tts-2-openai-server checkout.
-
-Usage in Dockerfile:
-  COPY overlay /overlay
-  RUN python /overlay/patch_upstream.py /app
-
-What it does:
-- Replaces generation/kani_generator.py with our patched version that supports
-  temperature/top_p/repetition_penalty/seed overrides and MAX_NUM_SEQS semaphore.
-- Patches server.py to add optional fields to OpenAISpeechRequest
-  (so it won't crash when it references request.temperature, etc.)
-"""
-
 from __future__ import annotations
 
 import re
@@ -26,71 +12,140 @@ def die(msg: str) -> None:
     raise SystemExit(1)
 
 
+def info(msg: str) -> None:
+    print(f"✅ {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"⚠️ {msg}", file=sys.stderr)
+
+
 def copy_file(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    print(f"✅ Copied {src} -> {dst}")
+    info(f"Copied {src} -> {dst}")
 
 
-def patch_openai_request_model(server_path: Path) -> None:
+def patch_request_model(server_path: Path) -> bool:
+    """
+    Find the Pydantic BaseModel used for /v1/audio/speech and add optional fields:
+    temperature/top_p/repetition_penalty/seed/max_tokens.
+
+    Works even if the class isn't named OpenAISpeechRequest.
+    """
     text = server_path.read_text(encoding="utf-8")
 
-    # If fields are already present, skip.
-    if re.search(r"class\s+OpenAISpeechRequest\s*\(BaseModel\)\s*:[\s\S]*\btemperature\b", text):
-        print("ℹ️  server.py already contains OpenAISpeechRequest sampling fields (temperature/top_p/...). Skipping.")
-        return
-
-    # Insert new optional fields at the end of the OpenAISpeechRequest class block.
-    # We do this by finding the next 'class <Something>(BaseModel):' after OpenAISpeechRequest.
-    m = re.search(
-        r"(class\s+OpenAISpeechRequest\s*\(BaseModel\)\s*:\s*)([\s\S]*?)(\nclass\s+\w+\s*\(BaseModel\)\s*:)",
+    # Heuristic: find a BaseModel class block that contains these typical fields.
+    # We match a class deriving from BaseModel and capture its body until next class.
+    class_iter = re.finditer(
+        r"(class\s+(?P<name>\w+)\s*\(\s*BaseModel\s*\)\s*:\s*)(?P<body>[\s\S]*?)(\nclass\s+\w+\s*\(\s*BaseModel\s*\)\s*:|\Z)",
         text,
-        flags=re.MULTILINE,
+        flags=re.M,
     )
-    if not m:
-        die(f"Could not locate OpenAISpeechRequest in {server_path}")
 
-    header = m.group(1)
-    body = m.group(2)
-    tail = m.group(3)
+    candidates = []
+    for m in class_iter:
+        name = m.group("name")
+        body = m.group("body")
+        body_l = body.lower()
 
-    insert = (
+        # Common request fields for OpenAI audio/speech:
+        # model, input, voice, response_format (sometimes stream_format)
+        score = 0
+        for token in ["model", "input", "voice", "response_format", "stream_format"]:
+            if re.search(rf"^\s*{token}\s*:", body, flags=re.M):
+                score += 1
+
+        if score >= 3:
+            candidates.append((score, name, m.start(), m.end(), m.group(1), body))
+
+    if not candidates:
+        warn("Could not find a BaseModel request class with fields {model,input,voice,response_format}.")
+        return False
+
+    # pick highest score
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    score, name, start, end, header, body = candidates[0]
+
+    # If already has temperature, no need to patch
+    if re.search(r"^\s*temperature\s*:", body, flags=re.M):
+        info(f"server.py: request model '{name}' already has temperature/top_p fields (skip)")
+        return True
+
+    inject = (
         "\n"
         "    # --- Optional sampling overrides (best-effort) ---\n"
-        "    # These are NOT part of the official OpenAI TTS request schema,\n"
-        "    # but some clients (and our tester scripts) send them.\n"
+        "    # Not standard OpenAI schema, but some clients send them.\n"
         "    temperature: float | None = None\n"
         "    top_p: float | None = None\n"
         "    repetition_penalty: float | None = None\n"
         "    seed: int | None = None\n"
+        "    max_tokens: int | None = None\n"
     )
 
-    new_text = text[: m.start()] + header + body + insert + tail + text[m.end() :]
+    new_body = body + inject
+    new_text = text[: start] + header + new_body + text[end - len(body) - len(header) :]
 
-    server_path.write_text(new_text, encoding="utf-8")
-    print("✅ Patched server.py: added OpenAISpeechRequest fields (temperature/top_p/repetition_penalty/seed)")
+    # The slicing above is tricky; do safer reconstruction using the match.
+    # Re-run match for the chosen class and rebuild:
+    m2 = re.search(
+        rf"(class\s+{re.escape(name)}\s*\(\s*BaseModel\s*\)\s*:\s*)([\s\S]*?)(\nclass\s+\w+\s*\(\s*BaseModel\s*\)\s*:|\Z)",
+        text,
+        flags=re.M,
+    )
+    if not m2:
+        warn(f"Unexpected: couldn't re-find chosen class {name}")
+        return False
+
+    rebuilt = text[: m2.start()] + m2.group(1) + m2.group(2) + inject + text[m2.end(2) :]
+    server_path.write_text(rebuilt, encoding="utf-8")
+    info(f"Patched server.py: added sampling fields to request model '{name}' (score={score})")
+    return True
+
+
+def patch_server_safe_fallback(server_path: Path) -> None:
+    """
+    If we can't find the request model, make server robust by replacing request.temperature access
+    with getattr(request, "temperature", None) etc.
+    """
+    text = server_path.read_text(encoding="utf-8")
+    before = text
+
+    text = text.replace("request.temperature", 'getattr(request, "temperature", None)')
+    text = text.replace("request.top_p", 'getattr(request, "top_p", None)')
+    text = text.replace("request.repetition_penalty", 'getattr(request, "repetition_penalty", None)')
+    text = text.replace("request.seed", 'getattr(request, "seed", None)')
+    text = text.replace("request.max_tokens", 'getattr(request, "max_tokens", None)')
+
+    if text != before:
+        server_path.write_text(text, encoding="utf-8")
+        info("Applied safe fallback: replaced request.<field> with getattr(request, <field>, None)")
+    else:
+        warn("Safe fallback did not change server.py (no request.<field> references found)")
 
 
 def main() -> None:
     repo_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/app")
     overlay_root = Path(__file__).resolve().parent
 
-    # Basic sanity checks
-    if not (repo_root / "server.py").exists():
-        die(f"{repo_root} does not look like kani-tts-2-openai-server (server.py missing)")
-    if not (overlay_root / "generation" / "kani_generator.py").exists():
-        die(f"{overlay_root} overlay is missing generation/kani_generator.py")
+    server_py = repo_root / "server.py"
+    if not server_py.exists():
+        die(f"{repo_root} does not look like the upstream server repo (server.py missing)")
+
+    gen_src = overlay_root / "generation" / "kani_generator.py"
+    if not gen_src.exists():
+        die(f"Overlay is missing generation/kani_generator.py at {gen_src}")
 
     # Copy patched generator
-    copy_file(
-        overlay_root / "generation" / "kani_generator.py",
-        repo_root / "generation" / "kani_generator.py",
-    )
+    copy_file(gen_src, repo_root / "generation" / "kani_generator.py")
 
-    # Patch server model (OpenAISpeechRequest)
-    patch_openai_request_model(repo_root / "server.py")
+    # Patch request model (best effort)
+    ok = patch_request_model(server_py)
+    if not ok:
+        # fallback so builds don't fail
+        patch_server_safe_fallback(server_py)
 
-    print("\n✅ Patch complete.")
+    info("Patch complete.")
 
 
 if __name__ == "__main__":
