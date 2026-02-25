@@ -7,9 +7,9 @@ import uvicorn
 # ==============================================================================
 # 1. AUTO-GENERER .pt FILER FRA .wav/.mp3 PÅ OPPSTART
 # ==============================================================================
-VOICES_DIR = "/app/voices"
+VOICES_DIR = "/app/speakers"
 if os.path.exists(VOICES_DIR):
-    print("\n🎤 Sjekker voices-mappen for lydfiler som trenger konvertering...")
+    print(f"\n🎤 Sjekker {VOICES_DIR}-mappen for lydfiler som trenger konvertering...")
     try:
         from kani_tts import SpeakerEmbedder
         embedder = None
@@ -34,44 +34,8 @@ if os.path.exists(VOICES_DIR):
             torch.cuda.empty_cache()
             print("🧹 Tømte grafikkminnet etter SpeakerEmbedder.")
             
-    except ImportError:
-        print("⚠️ Kunne ikke importere SpeakerEmbedder. Biblioteket mangler.")
     except Exception as e:
         print(f"⚠️ Feil under konvertering av lydfiler: {e}")
-
-# ==============================================================================
-# 2. MONKEY-PATCH FOR Å INJISERE VOICE CLONING I API-ET
-# ==============================================================================
-try:
-    import kani_tts.core
-    original_run_model = kani_tts.core.KaniModel.run_model
-    
-    def patched_run_model(self, text, language_tag=None, speaker_emb=None, temperature=1.0, top_p=0.95, repetition_penalty=1.1):
-        import re
-        import os
-        import torch
-        
-        # Hvis API-et ikke allerede har sendt med en speaker_emb
-        if speaker_emb is None:
-            # API-serveren formaterer ofte teksten som "kathrine: Hei på deg"
-            match = re.match(r'^([a-zA-Z0-9_-]+):\s*(.*)$', text)
-            if match:
-                voice_name = match.group(1).lower()
-                pt_path = f"/app/voices/{voice_name}.pt"
-                
-                if os.path.exists(pt_path):
-                    print(f"🎯 [Auto-Voice] Fant profil for '{voice_name}', aktiverer Voice Cloning!")
-                    # Last inn tensoren og send den med til modellen
-                    speaker_emb = torch.load(pt_path)
-                    if torch.cuda.is_available() and isinstance(speaker_emb, torch.Tensor):
-                        speaker_emb = speaker_emb.to("cuda")
-                        
-        return original_run_model(self, text, language_tag, speaker_emb, temperature, top_p, repetition_penalty)
-
-    kani_tts.core.KaniModel.run_model = patched_run_model
-    print("✅ Injisert Voice Cloning-støtte i KaniTTS!")
-except Exception as e:
-    print(f"⚠️ Kunne ikke patche KaniModel: {e}")
 
 # ==============================================================================
 # ORIGINAL SERVER KODE STARTER HER
