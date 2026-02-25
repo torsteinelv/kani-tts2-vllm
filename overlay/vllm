@@ -16,4 +16,6 @@ for ((i=0; i<${#args[@]}; i++)); do
 done
 
 export HOST PORT
-exec python /app/server.py
+
+# Viktig: vllm/vllm-openai image har python3, ikke python
+exec python3 /app/server.py
