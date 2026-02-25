@@ -1,5 +1,5 @@
 # Vi bruker PyTorch 2.5.1 fordi den har ferdigbygde flash-attn filer!
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime
 
 ARG UPSTREAM_REPO=https://github.com/nineninesix-ai/kani-tts-2-openai-server.git
 ARG UPSTREAM_REF=main
