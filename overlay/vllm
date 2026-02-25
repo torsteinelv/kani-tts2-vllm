@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vllm-stack calls: vllm serve <model> --host ... --port ...
+if [[ "${1:-}" == "serve" ]]; then
+  shift
+  MODEL="${1:-}"
+  if [[ -n "${MODEL:-}" && "${MODEL}" != --* ]]; then
+    shift
+    export MODEL_NAME="${MODEL_NAME:-$MODEL}"
+  fi
+fi
+
+HOST="0.0.0.0"
+PORT="8000"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host) HOST="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --gpu_memory_utilization|--gpu-memory-utilization)
+      GPU_MEMORY_UTILIZATION="$2"; export GPU_MEMORY_UTILIZATION; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+cd /app
+exec python /app/entrypoint.py
