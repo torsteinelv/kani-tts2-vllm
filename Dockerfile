@@ -19,8 +19,9 @@ WORKDIR /app
 # Pull upstream
 RUN git clone --depth 1 --branch ${UPSTREAM_REF} ${UPSTREAM_REPO} /app
 
-# Install deps
+# Install deps (explicitly include web server deps)
 RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir fastapi "uvicorn[standard]" \
     && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 
 # Copy overlay and patch upstream in-place
@@ -33,5 +34,4 @@ RUN chmod +x /usr/local/bin/vllm
 
 EXPOSE 8000
 
-# Keep CMD compatible with vllm-stack (it will override anyway, but safe)
 CMD ["vllm", "serve", "dummy", "--host", "0.0.0.0", "--port", "8000"]
