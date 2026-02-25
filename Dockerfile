@@ -1,35 +1,27 @@
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
-ARG KANI_SERVER_REPO=https://github.com/nineninesix-ai/kani-tts-2-openai-server.git
-ARG KANI_SERVER_REF=main
-
-ENV DEBIAN_FRONTEND=noninteractive \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates ffmpeg \
-    build-essential python3-dev cmake ninja-build pkg-config \
-    libsndfile1 libsndfile1-dev \
+      git ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-RUN git clone --depth 1 --branch ${KANI_SERVER_REF} ${KANI_SERVER_REPO} /app
+# Clone upstream server
+RUN git clone --depth 1 https://github.com/nineninesix-ai/kani-tts-2-openai-server.git /app
 
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install fastapi "uvicorn[standard]" scipy prometheus-client \
-    && pip install "nemo-toolkit[tts]==2.4.0" \
-    && pip install "transformers==4.57.1" \
-    && pip install triton
+# Install upstream deps (bruk requirements om den finnes i repoet ditt)
+# Hvis upstream ikke har requirements.txt, behold det du allerede gjør.
+RUN python -m pip install -U pip
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 
-# Copy our overlay files
-COPY overlay/entrypoint.py /app/entrypoint.py
-COPY overlay/patch_upstream.py /tmp/patch_upstream.py
-COPY overlay/vllm-wrapper.sh /usr/local/bin/vllm
+# Copy overlay + patch
+COPY overlay /overlay
+RUN python /overlay/patch_upstream.py /app
+
+# Install vllm shim so vllm-stack chart can start this container
+COPY overlay/vllm /usr/local/bin/vllm
 RUN chmod +x /usr/local/bin/vllm
 
-# Patch upstream minimally (no brittle regex storms)
-RUN python /tmp/patch_upstream.py
-
 EXPOSE 8000
-CMD ["python", "/app/entrypoint.py"]
+CMD ["vllm", "serve", "dummy", "--host", "0.0.0.0", "--port", "8000"]
