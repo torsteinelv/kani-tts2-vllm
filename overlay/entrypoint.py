@@ -202,7 +202,7 @@ def build_pt_from_audio_files() -> None:
 
 # --- Add useful extra endpoints on top of upstream server.py ---
 
-@app.get("/metrics", response_class=PlainTextResponse, dependencies=[Depends(require_bearer)])
+@app.get("/metrics", response_class=PlainTextResponse)
 def metrics() -> Response:
     try:
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest  # type: ignore
