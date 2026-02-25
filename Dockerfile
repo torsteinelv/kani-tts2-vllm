@@ -19,10 +19,12 @@ WORKDIR /app
 # Pull upstream
 RUN git clone --depth 1 --branch ${UPSTREAM_REF} ${UPSTREAM_REPO} /app
 
-# Install deps (explicitly include web server deps)
+# Install deps (explicitly include ALL required packages)
 RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir fastapi "uvicorn[standard]" scipy prometheus-client \
-    && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+    && pip install --no-cache-dir "nemo-toolkit[tts]==2.4.0" \
+    && pip install --no-cache-dir "transformers==4.57.1" \
+    && pip install --no-cache-dir triton
 
 # Copy overlay and patch upstream in-place
 COPY overlay /overlay
