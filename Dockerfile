@@ -30,7 +30,7 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 
 # TVING COMPUTE CAPABILITY 8.6 FOR RTX 3060
 ENV FLASH_ATTENTION_FORCE_BUILD=TRUE
-ENV MAX_JOBS=4
+ENV MAX_JOBS=1
 ENV TORCH_CUDA_ARCH_LIST="8.6"
 
 RUN pip install --no-cache-dir flash-attn --no-build-isolation \
