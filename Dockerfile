@@ -24,7 +24,7 @@ RUN git clone --depth 1 --branch ${UPSTREAM_REF} ${UPSTREAM_REPO} /app
 RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir fastapi "uvicorn[standard]" scipy prometheus-client \
     && pip install --no-cache-dir "nemo-toolkit[tts]==2.4.0" \
-    && pip install --no-cache-dir vllm --torch-backend=auto \
+    && pip install --no-cache-dir vllm \
     && pip install --no-cache-dir "transformers==4.57.1" \
     && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 
