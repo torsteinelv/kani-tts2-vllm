@@ -3,6 +3,7 @@ import time
 import glob
 import torch
 import uvicorn
+import subprocess
 
 # ==============================================================================
 # 1. AUTO-GENERER .pt FILER FRA .wav/.mp3 PÅ OPPSTART
@@ -24,10 +25,24 @@ if os.path.exists(VOICES_DIR):
                         device = "cuda" if torch.cuda.is_available() else "cpu"
                         embedder = SpeakerEmbedder(device=device)
                         
-                    print(f"🎙️ Trekker ut stemmeprofil fra {audio_file}...")
-                    emb = embedder.embed_audio_file(audio_file)
-                    torch.save(emb, pt_file)
-                    print(f"✅ Lagret superrask profil: {pt_file}")
+                    print(f"🎙️ Resampler {audio_file} til 16kHz og trekker ut profil...")
+                    
+                    # Bruker ffmpeg for å resample filen til en midlertidig 16kHz-fil
+                    tmp_audio = f"/tmp/{base_name}_16k.wav"
+                    subprocess.run([
+                        "ffmpeg", "-y", "-i", audio_file, 
+                        "-ar", "16000", "-ac", "1", tmp_audio
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    try:
+                        # Mater den resamplede 16kHz filen inn i modellen
+                        emb = embedder.embed_audio_file(tmp_audio)
+                        torch.save(emb, pt_file)
+                        print(f"✅ Lagret superrask profil: {pt_file}")
+                    finally:
+                        # Sletter den midlertidige filen for å rydde opp
+                        if os.path.exists(tmp_audio):
+                            os.remove(tmp_audio)
                     
         if embedder is not None and torch.cuda.is_available():
             del embedder
