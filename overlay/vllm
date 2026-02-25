@@ -1,35 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST="0.0.0.0"
-PORT="8000"
+# vllm-stack will call: vllm serve <something> --host ... --port ...
+# We ignore those args and just start our server.
 
-# vllm-stack kaller typisk: vllm serve <MODEL> --host ... --port ...
-# Vi bruker <MODEL> som fallback til MODEL_NAME hvis den ikke er satt.
-MODEL_FROM_ARGS=""
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8000}"
 
-if [[ "${1:-}" == "serve" ]]; then
-  MODEL_FROM_ARGS="${2:-}"
-fi
+# Make sure we run in the right dir
+cd /app
 
-# parse flags
-ARGS=("$@")
-for ((i=0; i<${#ARGS[@]}; i++)); do
-  case "${ARGS[$i]}" in
-    --host)
-      HOST="${ARGS[$((i+1))]}"
-      ;;
-    --port)
-      PORT="${ARGS[$((i+1))]}"
-      ;;
-  esac
-done
+echo "🎤 Starting KaniTTS vLLM server on ${HOST}:${PORT} (MODEL_NAME=${MODEL_NAME:-<not set>})"
 
-export HOST PORT
-
-if [[ -z "${MODEL_NAME:-}" && -n "${MODEL_FROM_ARGS}" ]]; then
-  export MODEL_NAME="${MODEL_FROM_ARGS}"
-fi
-
-echo "🎤 Starting KaniTTS vLLM server on ${HOST}:${PORT} (MODEL_NAME=${MODEL_NAME:-unset})"
-exec python3 -u /app/server.py
+exec python3 -m uvicorn server:app --host "${HOST}" --port "${PORT}" --log-level info
