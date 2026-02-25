@@ -7,7 +7,6 @@ def upsert_import_os(text: str) -> str:
     return "import os\n" + text
 
 def replace_or_insert_assignment(text: str, var: str, rhs: str) -> str:
-    """Standard hjelpefunksjon for config.py"""
     pat = re.compile(rf'^(\s*{re.escape(var)}\s*=\s*).+$', flags=re.MULTILINE)
     if pat.search(text):
         return pat.sub(rf'\1{rhs}', text, count=1)
@@ -20,7 +19,7 @@ def replace_or_insert_assignment(text: str, var: str, rhs: str) -> str:
     return "\n".join(lines) + ("\n" if not text.endswith("\n") else "")
 
 # -----------------------
-# 1) config.py (Miljøvariabler som standardverdier)
+# 1) config.py (ArgoCD overrides)
 # -----------------------
 cfg = Path("/app/config.py")
 cfg_txt = upsert_import_os(cfg.read_text())
@@ -34,78 +33,64 @@ overrides = [
 ]
 for var, rhs in overrides:
     cfg_txt = replace_or_insert_assignment(cfg_txt, var, rhs)
-cfg_txt = replace_or_insert_assignment(cfg_txt, "USE_CUDA_GRAPHS", 'os.getenv("USE_CUDA_GRAPHS", "0").lower() in ("1","true","yes")')
+cfg_txt = replace_or_insert_assignment(cfg_txt, "USE_CUDA_GRAPHS", 'os.getenv("USE_CUDA_GRAPHS", "0").lower() in ("1","true")')
 cfg.write_text(cfg_txt)
 print("✅ Patched config.py")
 
 # -----------------------
-# 2) vllm_generator.py (Gjør selve genereringen dynamisk)
+# 2) kani_generator.py (FIKSEN FOR TYPEERROR)
 # -----------------------
-vg = Path("/app/generation/vllm_generator.py")
-if vg.exists():
-    vtxt = upsert_import_os(vg.read_text())
-    vtxt = vtxt.replace("max_num_seqs=1,", 'max_num_seqs=int(os.getenv("MAX_NUM_SEQS", "1")),')
+kg = Path("/app/generation/kani_generator.py")
+if kg.exists():
+    ktxt = upsert_import_os(kg.read_text())
     
-    # 2a) Oppdater funksjonssignaturen til å ta imot dynamiske parametere
-    vtxt = vtxt.replace(
+    # Oppdaterer signaturen til å godta temperature osv.
+    ktxt = ktxt.replace(
         "async def _generate_async(self, prompt, audio_writer, max_tokens=MAX_TOKENS):",
         "async def _generate_async(self, prompt, audio_writer, max_tokens=None, temperature=None, top_p=None, repetition_penalty=None):"
     )
     
-    # 2b) Bytt ut SamplingParams-logikken slik at den faktisk bruker de innsendte verdiene
-    old_params = """        # Override max_tokens if different from default
-        if max_tokens != MAX_TOKENS:
-            sampling_params = SamplingParams(
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                max_tokens=max_tokens,
-                repetition_penalty=REPETITION_PENALTY,
-                stop_token_ids=[END_OF_AI],
-            )
-        else:
-            sampling_params = self.sampling_params"""
-            
-    new_params = """        sampling_params = SamplingParams(
-            temperature=temperature if temperature is not None else TEMPERATURE,
-            top_p=top_p if top_p is not None else TOP_P,
-            max_tokens=max_tokens if max_tokens is not None else MAX_TOKENS,
-            repetition_penalty=repetition_penalty if repetition_penalty is not None else REPETITION_PENALTY,
-            stop_token_ids=[END_OF_AI],
-        )"""
-    vtxt = vtxt.replace(old_params, new_params)
-    vg.write_text(vtxt)
-    print("✅ Patched vllm_generator.py (Låst opp dynamiske parametere)")
+    # Sørger for at generatoren faktisk bruker de innsendte verdiene
+    ktxt = ktxt.replace(
+        "temperature=TEMPERATURE, top_p=TOP_P, repetition_penalty=REPETITION_PENALTY",
+        "temperature=temperature if temperature is not None else TEMPERATURE, top_p=top_p if top_p is not None else TOP_P, repetition_penalty=repetition_penalty if repetition_penalty is not None else REPETITION_PENALTY"
+    )
+    
+    kg.write_text(ktxt)
+    print("✅ Patched kani_generator.py (Låst opp dynamiske parametere)")
+else:
+    print("⚠️ kani_generator.py ikke funnet!")
 
 # -----------------------
-# 3) server.py (Lås opp API-endepunktet)
+# 3) server.py (Wyoming fix + OpenAI params)
 # -----------------------
 srv = Path("/app/server.py")
 stxt = srv.read_text()
 
-# 3a) Legg til felt i OpenAISpeechRequest slik at FastAPI godtar dem i JSON
-stxt = stxt.replace(
-    "class OpenAISpeechRequest(BaseModel):",
-    "class OpenAISpeechRequest(BaseModel):\n    temperature: Optional[float] = None\n    top_p: Optional[float] = None\n    repetition_penalty: Optional[float] = None"
-)
+# Legg til felt i OpenAISpeechRequest
+if "temperature: Optional[float]" not in stxt:
+    stxt = stxt.replace(
+        "class OpenAISpeechRequest(BaseModel):",
+        "class OpenAISpeechRequest(BaseModel):\n    temperature: Optional[float] = None\n    top_p: Optional[float] = None\n    repetition_penalty: Optional[float] = None"
+    )
 
-# 3b) Oppdater kallene til generatoren slik at den sender verdiene videre
-# Dette må gjøres både for vanlig generering og for SSE-streaming
+# Send parametere videre til generatoren (SSE og vanlig)
 stxt = stxt.replace(
     "max_tokens=MAX_TOKENS",
     "max_tokens=MAX_TOKENS, temperature=request.temperature, top_p=request.top_p, repetition_penalty=request.repetition_penalty"
 )
 
-# 3c) Home Assistant støy-fiks (WAV int16)
+# Home Assistant int16 fix
 stxt = stxt.replace(
     "wav_write(wav_buffer, 22050, full_audio)",
     "wav_write(wav_buffer, 22050, (full_audio * 32767).astype(np.int16))"
 )
 
 srv.write_text(stxt)
-print("✅ Patched server.py (Låst opp API og fixet WAV)")
+print("✅ Patched server.py")
 
 # -----------------------
-# 4) inference_engine.py (Behold din eksisterende CUDA fiks)
+# 4) inference_engine.py (CUDA fiks)
 # -----------------------
 ie = Path("/app/kani_tts/inference_engine.py")
 if ie.exists():
