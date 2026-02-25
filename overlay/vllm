@@ -4,18 +4,32 @@ set -euo pipefail
 HOST="0.0.0.0"
 PORT="8000"
 
-# Parse --host/--port hvis vllm-stack sender dem
-args=("$@")
-for ((i=0; i<${#args[@]}; i++)); do
-  if [[ "${args[$i]}" == "--host" && $((i+1)) -lt ${#args[@]} ]]; then
-    HOST="${args[$((i+1))]}"
-  fi
-  if [[ "${args[$i]}" == "--port" && $((i+1)) -lt ${#args[@]} ]]; then
-    PORT="${args[$((i+1))]}"
-  fi
+# vllm-stack kaller typisk: vllm serve <MODEL> --host ... --port ...
+# Vi bruker <MODEL> som fallback til MODEL_NAME hvis den ikke er satt.
+MODEL_FROM_ARGS=""
+
+if [[ "${1:-}" == "serve" ]]; then
+  MODEL_FROM_ARGS="${2:-}"
+fi
+
+# parse flags
+ARGS=("$@")
+for ((i=0; i<${#ARGS[@]}; i++)); do
+  case "${ARGS[$i]}" in
+    --host)
+      HOST="${ARGS[$((i+1))]}"
+      ;;
+    --port)
+      PORT="${ARGS[$((i+1))]}"
+      ;;
+  esac
 done
 
 export HOST PORT
 
-# Viktig: vllm/vllm-openai image har python3, ikke python
-exec python3 /app/server.py
+if [[ -z "${MODEL_NAME:-}" && -n "${MODEL_FROM_ARGS}" ]]; then
+  export MODEL_NAME="${MODEL_FROM_ARGS}"
+fi
+
+echo "🎤 Starting KaniTTS vLLM server on ${HOST}:${PORT} (MODEL_NAME=${MODEL_NAME:-unset})"
+exec python3 -u /app/server.py
