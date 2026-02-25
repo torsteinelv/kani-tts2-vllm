@@ -26,6 +26,9 @@ def copy_file(src: Path, dst: Path) -> None:
     info(f"Copied {src} -> {dst}")
 
 
+BASEMODEL_RE = r"(?:pydantic\.)?BaseModel"
+
+
 def patch_request_model(server_path: Path) -> bool:
     """
     Find the Pydantic BaseModel used for /v1/audio/speech and add optional fields:
@@ -35,39 +38,33 @@ def patch_request_model(server_path: Path) -> bool:
     """
     text = server_path.read_text(encoding="utf-8")
 
-    # Heuristic: find a BaseModel class block that contains these typical fields.
-    # We match a class deriving from BaseModel and capture its body until next class.
     class_iter = re.finditer(
-        r"(class\s+(?P<name>\w+)\s*\(\s*BaseModel\s*\)\s*:\s*)(?P<body>[\s\S]*?)(\nclass\s+\w+\s*\(\s*BaseModel\s*\)\s*:|\Z)",
+        rf"(class\s+(?P<name>\w+)\s*\(\s*{BASEMODEL_RE}\s*\)\s*:\s*)(?P<body>[\s\S]*?)(\nclass\s+\w+\s*\(\s*{BASEMODEL_RE}\s*\)\s*:|\Z)",
         text,
         flags=re.M,
     )
 
-    candidates = []
+    candidates: list[tuple[int, str, str]] = []
     for m in class_iter:
         name = m.group("name")
         body = m.group("body")
-        body_l = body.lower()
 
-        # Common request fields for OpenAI audio/speech:
-        # model, input, voice, response_format (sometimes stream_format)
+        # Common request fields for OpenAI audio/speech
         score = 0
         for token in ["model", "input", "voice", "response_format", "stream_format"]:
             if re.search(rf"^\s*{token}\s*:", body, flags=re.M):
                 score += 1
 
         if score >= 3:
-            candidates.append((score, name, m.start(), m.end(), m.group(1), body))
+            candidates.append((score, name, body))
 
     if not candidates:
         warn("Could not find a BaseModel request class with fields {model,input,voice,response_format}.")
         return False
 
-    # pick highest score
     candidates.sort(key=lambda t: t[0], reverse=True)
-    score, name, start, end, header, body = candidates[0]
+    score, name, body = candidates[0]
 
-    # If already has temperature, no need to patch
     if re.search(r"^\s*temperature\s*:", body, flags=re.M):
         info(f"server.py: request model '{name}' already has temperature/top_p fields (skip)")
         return True
@@ -83,13 +80,8 @@ def patch_request_model(server_path: Path) -> bool:
         "    max_tokens: int | None = None\n"
     )
 
-    new_body = body + inject
-    new_text = text[: start] + header + new_body + text[end - len(body) - len(header) :]
-
-    # The slicing above is tricky; do safer reconstruction using the match.
-    # Re-run match for the chosen class and rebuild:
     m2 = re.search(
-        rf"(class\s+{re.escape(name)}\s*\(\s*BaseModel\s*\)\s*:\s*)([\s\S]*?)(\nclass\s+\w+\s*\(\s*BaseModel\s*\)\s*:|\Z)",
+        rf"(class\s+{re.escape(name)}\s*\(\s*{BASEMODEL_RE}\s*\)\s*:\s*)([\s\S]*?)(\nclass\s+\w+\s*\(\s*{BASEMODEL_RE}\s*\)\s*:|\Z)",
         text,
         flags=re.M,
     )
@@ -132,17 +124,15 @@ def main() -> None:
     if not server_py.exists():
         die(f"{repo_root} does not look like the upstream server repo (server.py missing)")
 
+    # OPTIONAL: if you keep a custom generator in overlay/generation/
     gen_src = overlay_root / "generation" / "kani_generator.py"
-    if not gen_src.exists():
-        die(f"Overlay is missing generation/kani_generator.py at {gen_src}")
+    if gen_src.exists():
+        copy_file(gen_src, repo_root / "generation" / "kani_generator.py")
+    else:
+        info("No overlay/generation/kani_generator.py found (skipping generator override)")
 
-    # Copy patched generator
-    copy_file(gen_src, repo_root / "generation" / "kani_generator.py")
-
-    # Patch request model (best effort)
     ok = patch_request_model(server_py)
     if not ok:
-        # fallback so builds don't fail
         patch_server_safe_fallback(server_py)
 
     info("Patch complete.")
