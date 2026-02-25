@@ -17,7 +17,9 @@ done
 cd /app
 echo "🚀 Starter KaniTTS Custom Engine (BemaTTS støtte)..."
 
-# Hvis du har entrypoint.py fra før, kan vi bruke den. Ellers starter vi serveren direkte.
+# VIKTIG: Tving Python til å se i /app-mappen etter moduler (som server.py)
+export PYTHONPATH="/app"
+
 if [ -f "/overlay/entrypoint.py" ]; then
     exec python /overlay/entrypoint.py
 else
