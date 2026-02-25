@@ -19,70 +19,147 @@ def warn(msg: str) -> None:
     print(f"⚠️ {msg}", file=sys.stderr)
 
 
-def normalize_newlines(s: str) -> str:
-    return s.replace("\r\n", "\n").replace("\r", "\n")
+ENV_MARKER = "# --- kani-tts2-vllm env overrides ---"
 
 
-def patch_voice_field(server_py: Path) -> None:
-    text = normalize_newlines(server_py.read_text(encoding="utf-8"))
-    before = text
+def patch_config_py(config_path: Path) -> None:
+    if not config_path.exists():
+        warn(f"config.py not found at {config_path} (skip)")
+        return
 
-    # Make voice: Literal[...] -> voice: str
-    # (safe to apply globally; typical only in request model)
-    text, n = re.subn(
-        r"(\bvoice\s*:\s*)Literal\[[^\]]+\]",
-        r"\1str",
+    text = config_path.read_text(encoding="utf-8")
+    if ENV_MARKER in text:
+        info("config.py already has env overrides (skip)")
+        return
+
+    inject = f"""
+{ENV_MARKER}
+# Do NOT edit upstream values above. We only override from env if present.
+import os as _os
+
+# Model
+MODEL_NAME = _os.getenv("MODEL_NAME", MODEL_NAME)
+
+# Streaming / chunking
+CHUNK_SIZE = int(_os.getenv("CHUNK_SIZE", CHUNK_SIZE))
+LOOKBACK_FRAMES = int(_os.getenv("LOOKBACK_FRAMES", LOOKBACK_FRAMES))
+MAX_NUM_SEQS = int(_os.getenv("MAX_NUM_SEQS", MAX_NUM_SEQS))
+
+# Sampling defaults
+TEMPERATURE = float(_os.getenv("TEMPERATURE", TEMPERATURE))
+TOP_P = float(_os.getenv("TOP_P", TOP_P))
+REPETITION_PENALTY = float(_os.getenv("REPETITION_PENALTY", REPETITION_PENALTY))
+
+# Long-form
+LONG_FORM_CHUNK_DURATION = float(_os.getenv("LONG_FORM_CHUNK_DURATION", LONG_FORM_CHUNK_DURATION))
+LONG_FORM_SILENCE_DURATION = float(_os.getenv("LONG_FORM_SILENCE_DURATION", LONG_FORM_SILENCE_DURATION))
+"""
+    config_path.write_text(text.rstrip() + "\n" + inject.lstrip(), encoding="utf-8")
+    info("Patched config.py (env overrides appended)")
+
+
+def patch_request_model(server_path: Path) -> bool:
+    """
+    Find the Pydantic BaseModel used for /v1/audio/speech and add optional fields:
+    temperature/top_p/repetition_penalty/seed/max_tokens.
+
+    Works even if the class isn't named OpenAISpeechRequest.
+    """
+    text = server_path.read_text(encoding="utf-8")
+
+    class_iter = re.finditer(
+        r"(class\s+(?P<name>\w+)\s*\(\s*BaseModel\s*\)\s*:\s*)(?P<body>[\s\S]*?)(\nclass\s+\w+\s*\(\s*BaseModel\s*\)\s*:|\Z)",
         text,
+        flags=re.M,
     )
-    if n > 0:
-        info(f"Patched voice type (Literal -> str), replacements={n}")
-    else:
-        warn("Did not find any 'voice: Literal[...]' to patch (maybe already str).")
 
-    if text != before:
-        server_py.write_text(text, encoding="utf-8")
+    candidates = []
+    for m in class_iter:
+        name = m.group("name")
+        body = m.group("body")
 
+        score = 0
+        for token in ["model", "input", "voice", "response_format", "stream_format"]:
+            if re.search(rf"^\s*{token}\s*:", body, flags=re.M):
+                score += 1
 
-def ensure_health_route(server_py: Path) -> None:
-    text = normalize_newlines(server_py.read_text(encoding="utf-8"))
-    if "/health" in text:
-        info("server.py already contains /health (skip)")
-        return
+        if score >= 3:
+            candidates.append((score, name, m.start(), m.end(), m.group(1), body))
 
-    # We add a route without decorators to make patching resilient:
-    # app.add_api_route("/health", ...)
-    # Insert shortly after FastAPI app creation.
-    m = re.search(r"\bapp\s*=\s*FastAPI\s*\(", text)
-    if not m:
-        warn("Could not find 'app = FastAPI(' – cannot inject /health safely.")
-        return
+    if not candidates:
+        warn("Could not find a BaseModel request class with fields {model,input,voice,response_format}.")
+        return False
 
-    # naive: find the first closing ')' after 'app = FastAPI('
-    start = m.end()
-    end = text.find(")", start)
-    if end == -1:
-        warn("Could not find closing ')' for FastAPI(...) – cannot inject /health.")
-        return
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    score, name, _, _, _, body = candidates[0]
+
+    if re.search(r"^\s*temperature\s*:", body, flags=re.M):
+        info(f"server.py: request model '{name}' already has temperature/top_p fields (skip)")
+        return True
 
     inject = (
         "\n"
-        "app.add_api_route('/health', lambda: {'status': 'ok'}, methods=['GET'])\n"
+        "    # --- Optional sampling overrides (best-effort) ---\n"
+        "    # Not standard OpenAI schema, but some clients send them.\n"
+        "    temperature: float | None = None\n"
+        "    top_p: float | None = None\n"
+        "    repetition_penalty: float | None = None\n"
+        "    seed: int | None = None\n"
+        "    max_tokens: int | None = None\n"
     )
 
-    text = text[: end + 1] + inject + text[end + 1 :]
-    server_py.write_text(text, encoding="utf-8")
-    info("Injected /health endpoint")
+    m2 = re.search(
+        rf"(class\s+{re.escape(name)}\s*\(\s*BaseModel\s*\)\s*:\s*)([\s\S]*?)(\nclass\s+\w+\s*\(\s*BaseModel\s*\)\s*:|\Z)",
+        text,
+        flags=re.M,
+    )
+    if not m2:
+        warn(f"Unexpected: couldn't re-find chosen class {name}")
+        return False
+
+    rebuilt = text[: m2.start()] + m2.group(1) + m2.group(2) + inject + text[m2.end(2) :]
+    server_path.write_text(rebuilt, encoding="utf-8")
+    info(f"Patched server.py: added sampling fields to request model '{name}' (score={score})")
+    return True
+
+
+def patch_server_safe_fallback(server_path: Path) -> None:
+    """
+    If we can't patch the request model, at least make server robust by replacing
+    request.temperature access with getattr(request, "temperature", None) etc.
+    """
+    text = server_path.read_text(encoding="utf-8")
+    before = text
+
+    text = text.replace("request.temperature", 'getattr(request, "temperature", None)')
+    text = text.replace("request.top_p", 'getattr(request, "top_p", None)')
+    text = text.replace("request.repetition_penalty", 'getattr(request, "repetition_penalty", None)')
+    text = text.replace("request.seed", 'getattr(request, "seed", None)')
+    text = text.replace("request.max_tokens", 'getattr(request, "max_tokens", None)')
+
+    if text != before:
+        server_path.write_text(text, encoding="utf-8")
+        info("Applied safe fallback: replaced request.<field> with getattr(request, <field>, None)")
+    else:
+        warn("Safe fallback did not change server.py (no request.<field> references found)")
 
 
 def main() -> None:
     repo_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/app")
-    server_py = repo_root / "server.py"
-    if not server_py.exists():
-        die(f"{server_py} not found. Did upstream layout change?")
 
-    patch_voice_field(server_py)
-    ensure_health_route(server_py)
-    info("Upstream patch complete.")
+    config_py = repo_root / "config.py"
+    server_py = repo_root / "server.py"
+
+    if not server_py.exists():
+        die(f"{repo_root} does not look like the upstream server repo (server.py missing)")
+
+    patch_config_py(config_py)
+
+    ok = patch_request_model(server_py)
+    if not ok:
+        patch_server_safe_fallback(server_py)
+
+    info("Patch complete.")
 
 
 if __name__ == "__main__":
