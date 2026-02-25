@@ -13,12 +13,14 @@ if os.path.exists(VOICES_DIR):
     print(f"\n🎤 Sjekker {VOICES_DIR}-mappen for lydfiler...")
     
     try:
-        # Først: Sjekk og reparer eventuelle eksisterende .pt-filer som har feil dimensjon
+        # Først: Sjekk og reparer eventuelle eksisterende .pt-filer
         for pt_file in glob.glob(os.path.join(VOICES_DIR, "*.pt")):
             try:
-                emb = torch.load(pt_file)
-                if isinstance(emb, torch.Tensor) and emb.dim() == 3 and emb.shape[0] == 1:
-                    torch.save(emb.squeeze(0), pt_file)
+                emb = torch.load(pt_file, map_location='cpu')
+                if isinstance(emb, torch.Tensor) and emb.dim() > 1:
+                    # Klemmer ut alle 1-tall slik at [1, 128] eller [1, 1, 128] blir [128]
+                    emb = emb.squeeze()
+                    torch.save(emb, pt_file)
                     print(f"🔧 Auto-fikset dimensjoner for eksisterende profil: {pt_file}")
             except Exception:
                 pass
@@ -50,9 +52,8 @@ if os.path.exists(VOICES_DIR):
                         # Mater den resamplede 16kHz filen inn i modellen
                         emb = embedder.embed_audio_file(tmp_audio)
                         
-                        # Fikser dimensjonen direkte før vi lagrer den nye filen!
-                        if emb.dim() == 3 and emb.shape[0] == 1:
-                            emb = emb.squeeze(0)
+                        # Tvinger den til å bli en ren 1D-vektor (128) før vi lagrer
+                        emb = emb.squeeze()
                             
                         torch.save(emb, pt_file)
                         print(f"✅ Lagret superrask profil: {pt_file}")
