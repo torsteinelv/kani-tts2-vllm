@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import re
 import sys
+import re
 from pathlib import Path
 
 
@@ -15,6 +15,10 @@ def info(msg: str) -> None:
     print(f"✅ {msg}")
 
 
+def warn(msg: str) -> None:
+    print(f"⚠️ {msg}", file=sys.stderr)
+
+
 def main() -> None:
     try:
         import vllm  # noqa: F401
@@ -23,6 +27,7 @@ def main() -> None:
 
     import vllm as _vllm
 
+    # Locate site-packages/vllm/.../lfm2.py inside the image
     target = (
         Path(_vllm.__file__).resolve().parent
         / "model_executor"
@@ -34,49 +39,41 @@ def main() -> None:
 
     text = target.read_text(encoding="utf-8")
 
-    marker = "kani-tts2-vllm: ignore extra lfm2 weights"
+    marker = "kani-tts2-vllm: ignore unknown LFM2 weights"
     if marker in text:
         info(f"{target} already patched (marker found).")
         return
 
-    # We patch this block in vLLM's Lfm2Model.load_weights():
-    #     param = params_dict[name]
-    #     weight_loader(param, loaded_weight)
-    #
-    # into:
-    #     param = params_dict.get(name)
-    #     if param is None:
-    #         continue
-    #     weight_loader(param, loaded_weight)
-    #
-    # This avoids crashing on weights that exist in the checkpoint but not in vLLM's LFM2 model,
-    # like learnable_rope_layers.*.alpha_weight.
-    pattern = re.compile(
-        r"(?m)^(?P<indent>\s*)param = params_dict\[name\]\s*\n"
-        r"(?P=indent)weight_loader\(param, loaded_weight\)\s*$"
-    )
+    # Replace ALL occurrences of:
+    #   param = params_dict[name]
+    # with safe-get + continue to ignore extra checkpoint keys (e.g. learnable_rope_layers.*)
+    pattern = re.compile(r"(?m)^(?P<indent>\s*)param\s*=\s*params_dict\[\s*name\s*\]\s*$")
 
-    m = pattern.search(text)
-    if not m:
-        die(
-            "Could not locate the expected 'param = params_dict[name]' block in vllm/model_executor/models/lfm2.py.\n"
-            "This likely means vLLM changed internally; update the patch script accordingly."
+    def repl(m: re.Match) -> str:
+        ind = m.group("indent")
+        return (
+            f"{ind}# {marker} (e.g. learnable_rope_layers.*)\n"
+            f"{ind}param = params_dict.get(name)\n"
+            f"{ind}if param is None:\n"
+            f"{ind}    continue\n"
         )
 
-    indent = m.group("indent")
-    replacement = (
-        f"{indent}# {marker} (e.g. learnable_rope_layers.*)\n"
-        f"{indent}param = params_dict.get(name)\n"
-        f"{indent}if param is None:\n"
-        f"{indent}    # Extra weights in some checkpoints (like KaniTTS2 learnable RoPE) are not supported by vLLM's LFM2.\n"
-        f"{indent}    # We ignore them so the engine can start.\n"
-        f"{indent}    continue\n"
-        f"{indent}weight_loader(param, loaded_weight)\n"
-    )
+    new_text, n = pattern.subn(repl, text)
 
-    new_text = pattern.sub(replacement, text, count=1)
+    if n == 0:
+        # Fallback: search for literal substring to help debug
+        if "params_dict[name]" in text:
+            die(
+                "Found 'params_dict[name]' but could not match the expected 'param = params_dict[name]' line.\n"
+                "Likely formatting/whitespace differs; adjust regex."
+            )
+        die(
+            "Could not find 'param = params_dict[name]' in lfm2.py. "
+            "This likely means vLLM changed internally."
+        )
+
     target.write_text(new_text, encoding="utf-8")
-    info(f"Patched: {target}")
+    info(f"Patched {target} (replaced {n} occurrence(s) of 'param = params_dict[name]').")
 
 
 if __name__ == "__main__":
