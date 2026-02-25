@@ -26,9 +26,7 @@ from config import (
     TOP_P,
     REPETITION_PENALTY,
     USE_CUDA_GRAPHS,
-    FORCE_MATH_SDP,
     MAX_MODEL_LEN,
-    MAX_NUM_SEQS,
     START_OF_SPEECH,
 )
 
