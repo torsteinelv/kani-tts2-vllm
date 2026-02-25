@@ -1,42 +1,47 @@
 FROM vllm/vllm-openai:v0.15.1
 
-ARG DEBIAN_FRONTEND=noninteractive
-ARG UPSTREAM_REPO=https://github.com/nineninesix-ai/kanitts-vllm.git
-ARG UPSTREAM_REF=main
-
-ENV PIP_NO_CACHE_DIR=1 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1
 
-# System deps (ffmpeg + libsndfile trengs ofte for audio)
+# --- Fix for CUDA Error 803 on newer host drivers ---
+# vLLM v0.15.1 images can pick up cuda-compat libcuda inside the container,
+# which can mismatch the host kernel driver. Remove compat + refresh ldconfig.
+# (Workaround documented by vLLM community.) 
+RUN rm -f /etc/ld.so.conf.d/00-cuda-compat.conf || true \
+ && rm -rf /usr/local/cuda/compat || true \
+ && ldconfig || true
+
+# Prefer host-mounted NVIDIA driver libs when running under nvidia-container-toolkit
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates ffmpeg libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
+    git ca-certificates ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 1) Hent faktisk vLLM-baserte TTS-serveren (server.py, config.py, generation/*, audio/*)
-RUN git clone --depth 1 --branch ${UPSTREAM_REF} ${UPSTREAM_REPO} /app
+# Pull upstream vLLM TTS server
+RUN git clone --depth 1 https://github.com/nineninesix-ai/kanitts-vllm.git /app \
+ && rm -rf /app/.git
 
-# 2) Installer nødvendige Python deps (nemo + riktig transformers er typisk nødvendig for KaniTTS pipeline)
-#    Merk: nemo-toolkit kan endre transformers-versjon, så vi pin'er etterpå.
+# Upstream needs nemo codec + newer transformers for model compatibility
+# (README notes the transformers vs nemo conflict; we upgrade after nemo install.)
 RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install --no-cache-dir "nemo-toolkit[tts]==2.4.0" \
-    && python3 -m pip install --no-cache-dir "transformers==4.57.1"
+ && python3 -m pip install --no-cache-dir "nemo-toolkit[tts]==2.4.0" \
+ && python3 -m pip install --no-cache-dir "transformers==4.57.1" "safetensors==0.5.2" "librosa==0.10.2.post1" "python-multipart==0.0.20"
 
-# 3) Copy overlay (shim + patch-script)
-COPY overlay /overlay
+# Copy overlay + patch upstream in-place
+COPY overlay /app/overlay
+RUN python3 /app/overlay/patch_upstream.py /app
 
-# 4) Patch vLLM slik at den ikke krasjer på learnable_rope_layers.* weights
-RUN python3 /overlay/patch_vllm_lfm2_ignore_extra_weights.py
+# Patch vLLM so LFM2 loader ignores extra weights (e.g. learnable_rope_layers.*)
+RUN python3 /app/overlay/patch_vllm_lfm2_ignore_extra_weights.py
 
-# 5) (Valgfritt men anbefalt) patch upstream server for health-endpoint + evt request-felter
-RUN python3 /overlay/patch_upstream.py /app
-
-# 6) vllm-stack forventer at "vllm" finnes i PATH. Vi legger inn wrapper som starter TTS-serveren.
+# vllm-stack compatibility shim (chart expects an executable named 'vllm' in PATH)
 COPY overlay/vllm /usr/local/bin/vllm
 RUN chmod +x /usr/local/bin/vllm
 
 EXPOSE 8000
-
-# chartet overstyrer ofte CMD, men dette er trygg default
-CMD ["vllm", "serve", "dummy", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/usr/local/bin/vllm"]
+CMD ["serve", "dummy", "--host", "0.0.0.0", "--port", "8000"]
