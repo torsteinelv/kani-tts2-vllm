@@ -1,7 +1,6 @@
-# PyTorch >=2.6 (transformers safety check)
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+# Vi bruker PyTorch 2.5.1 fordi den har ferdigbygde flash-attn filer!
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
-# BYTT TILBAKE TIL KANI-TTS-2-OPENAI-SERVER (Custom Engine)
 ARG UPSTREAM_REPO=https://github.com/nineninesix-ai/kani-tts-2-openai-server.git
 ARG UPSTREAM_REF=main
 
@@ -20,7 +19,6 @@ WORKDIR /app
 # Pull upstream
 RUN git clone --depth 1 --branch ${UPSTREAM_REF} ${UPSTREAM_REPO} /app
 
-# Install deps (inkludert triton for Custom Engine, nemo for lyd, og flash-attn for CUDA Graphs)
 # Install deps (inkludert triton for Custom Engine og nemo for lyd)
 RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir fastapi "uvicorn[standard]" scipy prometheus-client \
@@ -28,12 +26,8 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir "transformers==4.57.1" \
     && pip install --no-cache-dir triton
 
-# TVING COMPUTE CAPABILITY 8.6 FOR RTX 3060
-ENV FLASH_ATTENTION_FORCE_BUILD=TRUE
-ENV MAX_JOBS=1
-ENV TORCH_CUDA_ARCH_LIST="8.6"
-
-RUN pip install --no-cache-dir flash-attn --no-build-isolation \
+# JUKSETRIKSET: Last ned ferdigbygget flash-attn for Python 3.11, CUDA 12.4 og PyTorch 2.5 (Tar 10 sekunder istedenfor timer!)
+RUN pip install --no-cache-dir https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl \
     && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 
 # Copy overlay and patch upstream in-place
