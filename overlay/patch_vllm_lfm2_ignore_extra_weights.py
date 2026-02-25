@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import inspect
 import re
 import sys
 from pathlib import Path
 
-MARKER = "KANI_TTS2_IGNORE_UNKNOWN_WEIGHTS"
+
+MARKER = "kani-tts2-vllm-ignore-learnable-rope-weights"
 
 
 def die(msg: str) -> None:
@@ -24,46 +24,46 @@ def main() -> None:
     except Exception as e:
         die(f"Could not import vllm.model_executor.models.lfm2: {e}")
 
-    lfm2_path = Path(inspect.getfile(lfm2))
-    if not lfm2_path.exists():
-        die(f"lfm2.py not found at {lfm2_path}")
+    p = Path(lfm2.__file__)
+    if p.suffix == ".pyc":
+        cand = p.with_suffix(".py")
+        if cand.exists():
+            p = cand
 
-    text = lfm2_path.read_text(encoding="utf-8")
+    if not p.exists():
+        die(f"Could not find lfm2.py at {p}")
+
+    text = p.read_text(encoding="utf-8")
     if MARKER in text:
-        info(f"Already patched: {lfm2_path}")
+        info(f"vLLM already patched ({p})")
         return
 
-    # Patch ONLY the 'else:' branch loader:
-    #   param = params_dict[name]
-    #   weight_loader = getattr(param, "weight_loader", default_weight_loader)
-    #
-    # Insert:
-    #   if name not in params_dict: continue
-    pattern = re.compile(
-        r'^(?P<indent>[ \t]*)param\s*=\s*params_dict\[\s*name\s*\]\s*$\n'
-        r'(?P=indent)weight_loader\s*=\s*getattr\(\s*param,\s*[\'"]weight_loader[\'"]\s*,\s*default_weight_loader\s*\)',
-        flags=re.M,
-    )
+    # Patch any line that does: param = params_dict[name]
+    # so it ignores learnable_rope_layers.* keys instead of crashing.
+    pat = re.compile(r"^(?P<indent>[ \t]*)param\s*=\s*params_dict\[\s*name\s*\]\s*$", re.M)
 
-    m = pattern.search(text)
-    if not m:
-        die(
-            "Could not locate the expected else-branch 'param = params_dict[name]' + getattr(weight_loader) block.\n"
-            "vLLM internals likely changed; update this patch script."
+    def repl(m: re.Match) -> str:
+        ind = m.group("indent")
+        return (
+            f"{ind}# {MARKER}\n"
+            f"{ind}param = params_dict.get(name)\n"
+            f"{ind}if param is None:\n"
+            f"{ind}    # Ignore extra weights from BemaTTS learnable RoPE checkpoints\n"
+            f"{ind}    if isinstance(name, str) and name.startswith('learnable_rope_layers.'):\n"
+            f"{ind}        continue\n"
+            f"{ind}    raise KeyError(name)\n"
         )
 
-    indent = m.group("indent")
-    replacement = (
-        f"{indent}# {MARKER}\n"
-        f"{indent}if name not in params_dict:\n"
-        f"{indent}    continue\n"
-        f"{indent}param = params_dict[name]\n"
-        f'{indent}weight_loader = getattr(param, "weight_loader", default_weight_loader)'
-    )
+    new_text, n = pat.subn(repl, text)
+    if n == 0:
+        die(
+            "Could not find any 'param = params_dict[name]' lines in lfm2.py. "
+            "vLLM internals likely changed; update patch."
+        )
 
-    patched = pattern.sub(replacement, text, count=1)
-    lfm2_path.write_text(patched, encoding="utf-8")
-    info(f"Patched vLLM LFM2 weight loader to ignore unknown weights: {lfm2_path}")
+    p.write_text(new_text, encoding="utf-8")
+    info(f"Patched vLLM lfm2 loader to ignore learnable_rope_layers.* ({n} occurrences).")
+    info(f"File: {p}")
 
 
 if __name__ == "__main__":
