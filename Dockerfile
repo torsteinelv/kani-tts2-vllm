@@ -33,9 +33,8 @@ COPY overlay /overlay
 RUN python /overlay/patch_upstream.py /app
 
 # vllm-stack compatibility shim (must be named 'vllm' in PATH)
-COPY overlay/vllm-wrapper.sh /usr/local/bin/vllm
-RUN chmod +x /usr/local/bin/vllm
+COPY overlay/vllm-wrapper.sh /opt/conda/bin/vllm
+RUN chmod +x /opt/conda/bin/vllm
 
 EXPOSE 8000
-
 CMD ["vllm", "serve", "dummy", "--host", "0.0.0.0", "--port", "8000"]
