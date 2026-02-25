@@ -1,6 +1,7 @@
 name: Build & Push (vllm branch)
 
 on:
+  workflow_dispatch: 
   push:
     branches:
       - vllm
