@@ -21,7 +21,7 @@ RUN git clone --depth 1 --branch ${UPSTREAM_REF} ${UPSTREAM_REPO} /app
 
 # Install deps (explicitly include web server deps)
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir fastapi "uvicorn[standard]" \
+    && pip install --no-cache-dir fastapi "uvicorn[standard]" scipy prometheus-client \
     && if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 
 # Copy overlay and patch upstream in-place
