@@ -6,12 +6,24 @@ import uvicorn
 import subprocess
 
 # ==============================================================================
-# 1. AUTO-GENERER .pt FILER FRA .wav/.mp3 PÅ OPPSTART
+# 1. AUTO-GENERER OG REPARER .pt FILER PÅ OPPSTART
 # ==============================================================================
 VOICES_DIR = "/app/speakers"
 if os.path.exists(VOICES_DIR):
-    print(f"\n🎤 Sjekker {VOICES_DIR}-mappen for lydfiler som trenger konvertering...")
+    print(f"\n🎤 Sjekker {VOICES_DIR}-mappen for lydfiler...")
+    
     try:
+        # Først: Sjekk og reparer eventuelle eksisterende .pt-filer som har feil dimensjon
+        for pt_file in glob.glob(os.path.join(VOICES_DIR, "*.pt")):
+            try:
+                emb = torch.load(pt_file)
+                if isinstance(emb, torch.Tensor) and emb.dim() == 3 and emb.shape[0] == 1:
+                    torch.save(emb.squeeze(0), pt_file)
+                    print(f"🔧 Auto-fikset dimensjoner for eksisterende profil: {pt_file}")
+            except Exception:
+                pass
+
+        # Så: Bygg nye profiler fra .wav/.mp3 hvis de mangler
         from kani_tts import SpeakerEmbedder
         embedder = None
         for ext in ("*.wav", "*.mp3"):
@@ -37,6 +49,11 @@ if os.path.exists(VOICES_DIR):
                     try:
                         # Mater den resamplede 16kHz filen inn i modellen
                         emb = embedder.embed_audio_file(tmp_audio)
+                        
+                        # Fikser dimensjonen direkte før vi lagrer den nye filen!
+                        if emb.dim() == 3 and emb.shape[0] == 1:
+                            emb = emb.squeeze(0)
+                            
                         torch.save(emb, pt_file)
                         print(f"✅ Lagret superrask profil: {pt_file}")
                     finally:
