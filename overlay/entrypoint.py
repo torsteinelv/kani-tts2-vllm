@@ -215,12 +215,24 @@ def metrics() -> Response:
 
 @app.get("/v1/models", dependencies=[Depends(require_bearer)])
 def list_models() -> Dict[str, Any]:
-    # Keep this simple: advertise OpenAI-like model name used by HA / clients.
+    # Start med standardmodellen som kreves av mange klienter (f.eks. Home Assistant)
+    models = [
+        {"id": "tts-1", "object": "model", "owned_by": "local"},
+    ]
+    
+    # Skann SPEAKERS_DIR for å finne tilgjengelige .pt stemmefiler
+    if SPEAKERS_DIR.exists():
+        for pt_file in SPEAKERS_DIR.glob("*.pt"):
+            voice_name = pt_file.stem  # Henter navnet uten filendelsen '.pt'
+            models.append({
+                "id": voice_name,
+                "object": "model",
+                "owned_by": "local"
+            })
+
     return {
         "object": "list",
-        "data": [
-            {"id": "tts-1", "object": "model", "owned_by": "local"},
-        ],
+        "data": models,
     }
 
 
